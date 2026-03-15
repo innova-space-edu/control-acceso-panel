@@ -2,7 +2,26 @@
 import { useState } from 'react'
 import { createSupabaseBrowser } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
-import Image from 'next/image'
+
+function Logo() {
+  const [error, setError] = useState(false)
+
+  if (error) {
+    return <div className="text-blue-500 text-5xl mb-4">◈</div>
+  }
+
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src="/logo.png"
+      alt="Logo colegio"
+      width={80}
+      height={80}
+      className="object-contain mx-auto mb-4"
+      onError={() => setError(true)}
+    />
+  )
+}
 
 export default function LoginPage() {
   const router   = useRouter()
@@ -32,21 +51,7 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-10">
-          <div className="flex justify-center mb-4">
-            <Image
-              src="/logo.png"
-              alt="Logo colegio"
-              width={80}
-              height={80}
-              className="object-contain"
-              onError={(e) => {
-                e.currentTarget.style.display = 'none'
-                const fallback = e.currentTarget.nextElementSibling as HTMLElement
-                if (fallback) fallback.style.display = 'block'
-              }}
-            />
-            <span className="text-blue-500 text-5xl hidden">◈</span>
-          </div>
+          <Logo />
           <h1 className="text-slate-100 text-xl font-semibold">Control de Acceso</h1>
           <p className="text-slate-600 text-sm mt-1">Panel Administrador</p>
         </div>
