@@ -13,7 +13,7 @@ function Logo() {
   return (
     // eslint-disable-next-line @next/next/no-img-element
     <img
-      src="/logo.png"
+      src="/logo.jpg"
       alt="Logo colegio"
       width={80}
       height={80}
