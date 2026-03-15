@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import BtnLogout from '@/components/BtnLogout'
+import Image from 'next/image'
 
 const nav = [
   { href: '/',          icon: '⬡', label: 'Dashboard'   },
@@ -21,7 +22,22 @@ export default function Sidebar() {
   return (
     <aside className="fixed top-0 left-0 h-screen w-56 bg-[#0d1520] border-r border-[#1a2a40] flex flex-col z-50">
       <div className="px-5 py-6 border-b border-[#1a2a40]">
-        <div className="text-blue-500 text-2xl mb-1">◈</div>
+        <div className="mb-2">
+          <Image
+            src="/logo.png"
+            alt="Logo colegio"
+            width={48}
+            height={48}
+            className="object-contain"
+            onError={(e) => {
+              // Si no encuentra la imagen, muestra el ícono por defecto
+              e.currentTarget.style.display = 'none'
+              const fallback = e.currentTarget.nextElementSibling as HTMLElement
+              if (fallback) fallback.style.display = 'block'
+            }}
+          />
+          <span className="text-blue-500 text-2xl hidden">◈</span>
+        </div>
         <div className="text-slate-200 font-semibold text-sm leading-tight">Control de Acceso</div>
         <div className="text-slate-600 text-xs mt-0.5">Panel Administrador</div>
       </div>

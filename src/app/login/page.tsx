@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { createSupabaseBrowser } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import Image from 'next/image'
 
 export default function LoginPage() {
   const router   = useRouter()
@@ -14,18 +15,13 @@ export default function LoginPage() {
     if (!email || !password) { setError('Completa los dos campos'); return }
     setCargando(true)
     setError('')
-
-    // Usamos el browser client para que la sesión quede en cookies
     const sb = createSupabaseBrowser()
     const { error: err } = await sb.auth.signInWithPassword({ email, password })
-
     if (err) {
       setError('Correo o contraseña incorrectos')
       setCargando(false)
       return
     }
-
-    // Redirigir al dashboard
     router.push('/')
     router.refresh()
   }
@@ -36,7 +32,21 @@ export default function LoginPage() {
 
         {/* Logo */}
         <div className="text-center mb-10">
-          <div className="text-blue-500 text-5xl mb-4">◈</div>
+          <div className="flex justify-center mb-4">
+            <Image
+              src="/logo.png"
+              alt="Logo colegio"
+              width={80}
+              height={80}
+              className="object-contain"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none'
+                const fallback = e.currentTarget.nextElementSibling as HTMLElement
+                if (fallback) fallback.style.display = 'block'
+              }}
+            />
+            <span className="text-blue-500 text-5xl hidden">◈</span>
+          </div>
           <h1 className="text-slate-100 text-xl font-semibold">Control de Acceso</h1>
           <p className="text-slate-600 text-sm mt-1">Panel Administrador</p>
         </div>
@@ -58,7 +68,6 @@ export default function LoginPage() {
                 autoFocus
               />
             </div>
-
             <div>
               <label className="text-slate-600 text-xs block mb-1.5">Contraseña</label>
               <input
