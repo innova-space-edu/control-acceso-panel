@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #060a10;
+  color: #cbd5e1;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #0d1520; }
+::-webkit-scrollbar-thumb { background: #1e3a5f; border-radius: 3px; }
+
+/* Animación ping para alertas */
+@keyframes ping-slow {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.15); }
+}
+.ping-slow { animation: ping-slow 2s ease-in-out infinite; }
+
+/* Tabla */
+.tabla th {
+  background: #0d1520;
+  color: #475569;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 500;
+  border-bottom: 1px solid #1e3a5f;
+}
+.tabla td {
+  padding: 11px 14px;
+  font-size: 13px;
+  border-bottom: 1px solid #0d1520;
+  color: #94a3b8;
+}
+.tabla tr:hover td { background: #0d1520; }
+
+/* Input base */
+.input-dark {
+  background: #0d1520;
+  border: 1px solid #1e3a5f;
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+  color: #e2e8f0;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.15s;
+}
+.input-dark:focus { border-color: #2563eb; }
+.input-dark::placeholder { color: #334155; }
+
+/* Botón primario */
+.btn-primary {
+  background: #1d4ed8;
+  color: #eff6ff;
+  border: none;
+  border-radius: 8px;
+  padding: 9px 20px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-primary:hover { background: #1e40af; }
+.btn-primary:disabled { background: #1e3a5f; color: #334155; cursor: not-allowed; }
+
+/* Badge */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 10px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.badge-green  { background: #052e16; color: #4ade80; }
+.badge-red    { background: #2d0a0a; color: #f87171; }
+.badge-amber  { background: #2d1a00; color: #fbbf24; }
+.badge-blue   { background: #0c2044; color: #60a5fa; }
+.badge-purple { background: #1e0f3d; color: #a78bfa; }
+.badge-gray   { background: #111c2d; color: #64748b; }
