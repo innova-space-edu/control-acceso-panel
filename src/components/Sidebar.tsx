@@ -70,7 +70,7 @@ export default function Sidebar() {
 
       <div className="px-3 py-4 border-t border-[#1a2a40] space-y-1">
         <BtnLogout />
-        <div className="text-slate-700 text-xs px-3">v1.0 · Fase 1</div>
+        <div className="text-slate-700 text-xs px-3">v1.0 · 2026</div>
       </div>
     </aside>
   )
