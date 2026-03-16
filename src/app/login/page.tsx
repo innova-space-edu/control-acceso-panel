@@ -102,7 +102,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-slate-700 text-xs text-center mt-6">
-          Sistema de Control de Acceso Escolar · v1.0
+          Sistema de Control de Acceso Escolar · 2026
         </p>
       </div>
     </div>
