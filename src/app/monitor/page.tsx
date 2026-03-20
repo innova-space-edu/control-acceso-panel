@@ -14,17 +14,16 @@ interface Sesion {
 
 export default function MonitorPage() {
   const [sesiones, setSesiones] = useState<Sesion[]>([])
-  const [loading, setLoading] = useState(true)
-  const [ahora, setAhora] = useState(new Date())
+  const [loading, setLoading]   = useState(true)
+  const [ahora, setAhora]       = useState(new Date())
 
   useEffect(() => {
     cargar()
     const iv = setInterval(() => setAhora(new Date()), 1000)
 
-    // Suscripción Realtime
     const canal = supabase
       .channel('sesiones_monitor')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones_activas' }, () => cargar())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones_activas' }, cargar)
       .subscribe()
 
     return () => {
@@ -41,7 +40,6 @@ export default function MonitorPage() {
 
     if (!sas) { setLoading(false); return }
 
-    // Enriquecer con datos de persona y notebook
     const enriched = await Promise.all(sas.map(async (s) => {
       const [{ data: nb }, { data: est }, { data: doc }] = await Promise.all([
         supabase.from('notebooks').select('nombre, sala').eq('id', s.notebook_id).single(),
@@ -51,12 +49,12 @@ export default function MonitorPage() {
       const persona = est || doc
       return {
         notebook_id: s.notebook_id,
-        rut: s.rut,
-        inicio: s.inicio,
-        nombre: persona?.nombre || s.rut,
+        rut:         s.rut,
+        inicio:      s.inicio,
+        nombre:      persona?.nombre || s.rut,
         curso_o_esp: est?.curso || doc?.especialidad || '—',
-        sala: nb?.sala || '—',
-        rol: est ? 'estudiante' : doc ? 'docente' : 'desconocido',
+        sala:        nb?.sala  || '—',
+        rol:         est ? 'estudiante' : doc ? 'docente' : 'desconocido',
       } as Sesion
     }))
 
@@ -66,6 +64,7 @@ export default function MonitorPage() {
 
   function duracion(inicio: string) {
     const diff = Math.floor((ahora.getTime() - new Date(inicio).getTime()) / 1000)
+    if (diff < 0) return '—'
     const h = Math.floor(diff / 3600)
     const m = Math.floor((diff % 3600) / 60)
     const s = diff % 60
@@ -74,15 +73,25 @@ export default function MonitorPage() {
     return `${s}s`
   }
 
+  function formatFechaHora(iso: string) {
+    const d = new Date(iso)
+    return d.toLocaleDateString('es-CL', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      + ' ' + d.toLocaleTimeString('es-CL')
+  }
+
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-5xl mx-auto">
       <div className="mb-7">
         <div className="flex items-center gap-3 mb-1">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse inline-block" />
           <h1 className="text-2xl font-semibold text-slate-100">Monitor en vivo</h1>
-          <span className="badge badge-green ml-2">{sesiones.length} activo{sesiones.length !== 1 ? 's' : ''}</span>
+          <span className="badge badge-green ml-2">
+            {sesiones.length} activo{sesiones.length !== 1 ? 's' : ''}
+          </span>
         </div>
-        <p className="text-slate-600 text-sm">Actualización automática vía Supabase Realtime</p>
+        <p className="text-slate-600 text-sm">
+          Actualización automática · {ahora.toLocaleTimeString('es-CL')} · {ahora.toLocaleDateString('es-CL')}
+        </p>
       </div>
 
       <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
@@ -94,8 +103,8 @@ export default function MonitorPage() {
               <th>Curso / Especialidad</th>
               <th>Notebook</th>
               <th>Sala</th>
-              <th>Hora inicio</th>
-              <th>Duración</th>
+              <th>Fecha y hora inicio</th>
+              <th>Tiempo activo</th>
             </tr>
           </thead>
           <tbody>
@@ -120,19 +129,17 @@ export default function MonitorPage() {
                 <td>{s.curso_o_esp}</td>
                 <td className="font-mono text-xs text-slate-400">{s.notebook_id}</td>
                 <td>{s.sala}</td>
-                <td className="font-mono text-xs">{new Date(s.inicio).toLocaleTimeString('es-CL')}</td>
-                <td className="font-mono text-xs text-emerald-500">{duracion(s.inicio)}</td>
+                <td className="font-mono text-xs">{formatFechaHora(s.inicio)}</td>
+                <td>
+                  <span className="font-mono text-xs text-emerald-400 bg-emerald-950/30 px-2 py-0.5 rounded">
+                    {duracion(s.inicio)}
+                  </span>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-
-      {sesiones.length > 0 && (
-        <p className="text-slate-700 text-xs mt-3 text-right">
-          {ahora.toLocaleTimeString('es-CL')} — actualizando en tiempo real
-        </p>
-      )}
     </div>
   )
 }
