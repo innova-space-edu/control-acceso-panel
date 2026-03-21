@@ -1,456 +1,342 @@
 'use client'
-import { useState, useEffect, useRef } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useEffect, useState } from 'react'
+import { supabase, type Alerta } from '@/lib/supabase'
 
-// ── TIPOS ──────────────────────────────────────────────────────────────────────
-interface DonutData {
-  label: string
-  value: number
-  color: string
+const TIPO_LABEL: Record<string, string> = {
+  duplicado:       '⚠ Duplicado',
+  exceso_intentos: '🔒 Exceso intentos',
+  rut_invalido:    '✗ RUT inválido',
+  sospechoso:      '⚑ Sospechoso',
+}
+const TIPO_BADGE: Record<string, string> = {
+  duplicado:       'badge-purple',
+  exceso_intentos: 'badge-red',
+  rut_invalido:    'badge-amber',
+  sospechoso:      'badge-red',
 }
 
-interface EstadisticasData {
-  resultados: DonutData[]
-  cursos: DonutData[]
-  notebooks: DonutData[]
-  porHora: DonutData[]
+interface SesionActiva {
+  notebook_id: string
+  rut: string
+  inicio: string
 }
 
-// ── PALETAS DE COLORES ─────────────────────────────────────────────────────────
-const COLORES_RESULTADO = ['#22d3ee', '#f43f5e', '#a855f7']
-const COLORES_CURSOS    = ['#06b6d4','#8b5cf6','#10b981','#f59e0b','#ef4444','#3b82f6','#ec4899','#14b8a6','#f97316','#84cc16']
-const COLORES_NOTEBOOKS = ['#38bdf8','#fb7185','#a78bfa','#34d399','#fbbf24','#60a5fa','#f472b6','#4ade80','#fb923c','#c084fc']
-const COLORES_HORA      = ['#0ea5e9','#6366f1','#8b5cf6','#a855f7','#d946ef','#ec4899','#f43f5e','#fb923c','#f59e0b','#84cc16','#22c55e','#10b981']
+interface ModalDuplicado {
+  alerta: Alerta
+  sesiones: SesionActiva[]
+}
 
-// ── COMPONENTE DONUT ───────────────────────────────────────────────────────────
-function DonutChart({ data, titulo, total }: {
-  data: DonutData[]
-  titulo: string
-  total: number
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [hovered, setHovered] = useState<number | null>(null)
+export default function AlertasPage() {
+  const [alertas, setAlertas]           = useState<Alerta[]>([])
+  const [loading, setLoading]           = useState(true)
+  const [filtro, setFiltro]             = useState<'pendientes' | 'todas'>('pendientes')
+  const [resolviendo, setResolviendo]   = useState<string | null>(null)
+  const [modal, setModal]               = useState<ModalDuplicado | null>(null)
+  const [cerrandoSesion, setCerrandoSesion] = useState<string | null>(null)
+  const [msgError, setMsgError]         = useState('')
+  const [msgExito, setMsgExito]         = useState('')
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || data.length === 0) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    cargar()
+    const canal = supabase
+      .channel('alertas_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'alertas' }, () => cargar())
+      .subscribe()
+    return () => { supabase.removeChannel(canal) }
+  }, [filtro])
 
-    const w = canvas.width
-    const h = canvas.height
-    const cx = w / 2
-    const cy = h / 2
-    const r  = Math.min(cx, cy) - 10
-    const ri = r * 0.58  // radio interior
-
-    ctx.clearRect(0, 0, w, h)
-
-    let startAngle = -Math.PI / 2
-    const totalVal = data.reduce((s, d) => s + d.value, 0)
-    if (totalVal === 0) return
-
-    data.forEach((seg, i) => {
-      const slice = (seg.value / totalVal) * 2 * Math.PI
-      const endAngle = startAngle + slice
-      const isHov = hovered === i
-      const offset = isHov ? 6 : 0
-
-      const midAngle = startAngle + slice / 2
-      const ox = Math.cos(midAngle) * offset
-      const oy = Math.sin(midAngle) * offset
-
-      // Sombra
-      ctx.shadowColor = seg.color + '66'
-      ctx.shadowBlur  = isHov ? 18 : 8
-
-      ctx.beginPath()
-      ctx.moveTo(cx + ox, cy + oy)
-      ctx.arc(cx + ox, cy + oy, r, startAngle, endAngle)
-      ctx.arc(cx + ox, cy + oy, ri, endAngle, startAngle, true)
-      ctx.closePath()
-
-      // Gradiente radial
-      const grad = ctx.createRadialGradient(cx + ox, cy + oy, ri, cx + ox, cy + oy, r)
-      grad.addColorStop(0, seg.color + 'cc')
-      grad.addColorStop(1, seg.color)
-      ctx.fillStyle = grad
-      ctx.fill()
-
-      // Borde
-      ctx.strokeStyle = '#060a10'
-      ctx.lineWidth = 2
-      ctx.stroke()
-
-      ctx.shadowBlur = 0
-      startAngle = endAngle
-    })
-
-    // Texto central
-    ctx.fillStyle = '#f1f5f9'
-    ctx.font = `bold ${Math.floor(r * 0.28)}px Segoe UI`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(total.toString(), cx, cy - 8)
-    ctx.fillStyle = '#475569'
-    ctx.font = `${Math.floor(r * 0.14)}px Segoe UI`
-    ctx.fillText('total', cx, cy + 14)
-
-  }, [data, hovered, total])
-
-  // Detectar hover
-  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const mx = e.clientX - rect.left - canvas.width / 2
-    const my = e.clientY - rect.top  - canvas.height / 2
-    const dist = Math.sqrt(mx * mx + my * my)
-    const r  = Math.min(canvas.width, canvas.height) / 2 - 10
-    const ri = r * 0.58
-
-    if (dist < ri || dist > r) { setHovered(null); return }
-
-    let angle = Math.atan2(my, mx) + Math.PI / 2
-    if (angle < 0) angle += 2 * Math.PI
-    const totalVal = data.reduce((s, d) => s + d.value, 0)
-    let start = 0
-    for (let i = 0; i < data.length; i++) {
-      const slice = (data[i].value / totalVal) * 2 * Math.PI
-      if (angle >= start && angle < start + slice) { setHovered(i); return }
-      start += slice
+  async function cargar() {
+    setLoading(true)
+    let q = supabase.from('alertas').select('*').order('timestamp', { ascending: false }).limit(100)
+    if (filtro === 'pendientes') q = q.eq('resuelta', false)
+    const { data, error } = await q
+    if (error) {
+      setMsgError('Error al cargar alertas: ' + error.message)
+    } else {
+      setAlertas(data || [])
+      setMsgError('')
     }
-    setHovered(null)
+    setLoading(false)
   }
 
-  const totalVal = data.reduce((s, d) => s + d.value, 0)
+  async function resolver(id: string) {
+    setResolviendo(id)
+    setMsgError('')
+    const { error } = await supabase
+      .from('alertas')
+      .update({ resuelta: true })
+      .eq('id', id)
+    if (error) {
+      setMsgError('Error al resolver: ' + error.message)
+    } else {
+      setMsgExito('Alerta marcada como resuelta')
+      setTimeout(() => setMsgExito(''), 3000)
+      await cargar()
+    }
+    setResolviendo(null)
+  }
+
+  async function resolverTodas() {
+    setMsgError('')
+    const { error } = await supabase
+      .from('alertas')
+      .update({ resuelta: true })
+      .eq('resuelta', false)
+    if (error) {
+      setMsgError('Error al resolver todas: ' + error.message)
+    } else {
+      setMsgExito('Todas las alertas resueltas')
+      setTimeout(() => setMsgExito(''), 3000)
+      await cargar()
+    }
+  }
+
+  async function abrirModalDuplicado(alerta: Alerta) {
+    if (!alerta.rut) return
+    const { data } = await supabase
+      .from('sesiones_activas')
+      .select('notebook_id, rut, inicio')
+      .eq('rut', alerta.rut)
+    setModal({ alerta, sesiones: data || [] })
+  }
+
+  async function cerrarSesionNotebook(notebook_id: string, alertaId: string) {
+    setCerrandoSesion(notebook_id)
+    setMsgError('')
+
+    // Señal al kiosk: forzar_cierre = true
+    const { error: e1 } = await supabase
+      .from('sesiones_activas')
+      .update({ forzar_cierre: true })
+      .eq('notebook_id', notebook_id)
+
+    if (e1) {
+      // Si forzar_cierre no existe, eliminar directamente
+      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
+    } else {
+      // Esperar que el kiosk procese
+      await new Promise(r => setTimeout(r, 4000))
+      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
+    }
+
+    // Cerrar acceso activo
+    const { data: accesos } = await supabase
+      .from('accesos')
+      .select('id')
+      .eq('notebook_id', notebook_id)
+      .is('timestamp_fin', null)
+      .order('timestamp_inicio', { ascending: false })
+      .limit(1)
+    if (accesos && accesos.length > 0) {
+      await supabase.from('accesos')
+        .update({ timestamp_fin: new Date().toISOString() })
+        .eq('id', accesos[0].id)
+    }
+
+    await resolver(alertaId)
+    setModal(null)
+    setCerrandoSesion(null)
+    setMsgExito('Sesión cerrada correctamente')
+    setTimeout(() => setMsgExito(''), 3000)
+  }
+
+  async function cerrarTodasSesiones(rut: string, alertaId: string) {
+    setCerrandoSesion('todas')
+    setMsgError('')
+
+    const { error: e1 } = await supabase
+      .from('sesiones_activas')
+      .update({ forzar_cierre: true })
+      .eq('rut', rut)
+
+    if (!e1) {
+      await new Promise(r => setTimeout(r, 4000))
+    }
+
+    // Cerrar accesos abiertos
+    const { data: accesos } = await supabase
+      .from('accesos')
+      .select('id')
+      .eq('rut', rut)
+      .is('timestamp_fin', null)
+    if (accesos) {
+      for (const a of accesos) {
+        await supabase.from('accesos')
+          .update({ timestamp_fin: new Date().toISOString() })
+          .eq('id', a.id)
+      }
+    }
+
+    await supabase.from('sesiones_activas').delete().eq('rut', rut)
+    await resolver(alertaId)
+    setModal(null)
+    setCerrandoSesion(null)
+    setMsgExito('Todas las sesiones cerradas')
+    setTimeout(() => setMsgExito(''), 3000)
+  }
+
+  const pendientes = alertas.filter(a => !a.resuelta)
 
   return (
-    <div className="bg-[#0d1520] border border-[#1a2a40] rounded-2xl p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-        <h3 className="text-slate-300 text-sm font-semibold">{titulo}</h3>
+    <div className="max-w-4xl mx-auto">
+      <div className="mb-7 flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-100 mb-1">Alertas de seguridad</h1>
+          <p className="text-slate-600 text-sm">Eventos detectados por los notebooks</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {pendientes.length > 1 && (
+            <button onClick={resolverTodas}
+              className="text-xs text-slate-500 hover:text-slate-300 border border-[#1a2a40] rounded-lg px-3 py-2 transition-colors">
+              Resolver todas
+            </button>
+          )}
+          <div className="flex rounded-lg overflow-hidden border border-[#1a2a40]">
+            {(['pendientes', 'todas'] as const).map(f => (
+              <button key={f} onClick={() => setFiltro(f)}
+                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                  filtro === f ? 'bg-blue-900/40 text-blue-400' : 'text-slate-500 hover:text-slate-300'
+                }`}>
+                {f === 'pendientes' ? `Pendientes (${pendientes.length})` : 'Todas'}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
-      {data.length === 0 ? (
-        <div className="text-center text-slate-600 text-xs py-8">Sin datos</div>
-      ) : (
-        <div className="flex gap-4 items-start">
-          {/* Canvas donut */}
-          <div className="flex-shrink-0">
-            <canvas
-              ref={canvasRef}
-              width={160} height={160}
-              onMouseMove={handleMouseMove}
-              onMouseLeave={() => setHovered(null)}
-              className="cursor-pointer"
-            />
-          </div>
-
-          {/* Leyenda */}
-          <div className="flex-1 space-y-1.5 min-w-0">
-            {data.map((d, i) => {
-              const pct = totalVal > 0 ? ((d.value / totalVal) * 100).toFixed(1) : '0'
-              return (
-                <div
-                  key={i}
-                  onMouseEnter={() => setHovered(i)}
-                  onMouseLeave={() => setHovered(null)}
-                  className={`flex items-center gap-2 rounded-lg px-2 py-1 cursor-pointer transition-all ${
-                    hovered === i ? 'bg-white/5' : ''
-                  }`}
-                >
-                  <span
-                    className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: d.color, boxShadow: `0 0 6px ${d.color}88` }}
-                  />
-                  <span className="text-slate-400 text-xs truncate flex-1" title={d.label}>
-                    {d.label}
-                  </span>
-                  <span className="text-xs font-mono flex-shrink-0" style={{ color: d.color }}>
-                    {pct}%
-                  </span>
-                  <span className="text-slate-600 text-xs flex-shrink-0">
-                    ({d.value})
-                  </span>
-                </div>
-              )
-            })}
-          </div>
+      {/* Mensajes */}
+      {msgError && (
+        <div className="bg-red-950/30 border border-red-900/50 rounded-xl px-5 py-3 mb-4 text-red-400 text-sm">
+          {msgError}
         </div>
       )}
-    </div>
-  )
-}
+      {msgExito && (
+        <div className="bg-emerald-950/30 border border-emerald-900/50 rounded-xl px-5 py-3 mb-4 text-emerald-400 text-sm">
+          ✓ {msgExito}
+        </div>
+      )}
 
-// ── PÁGINA PRINCIPAL ───────────────────────────────────────────────────────────
-export default function ReportesPage() {
-  const [generando, setGenerando] = useState<string | null>(null)
-  const [stats, setStats]         = useState<EstadisticasData | null>(null)
-  const [loadingStats, setLoadingStats] = useState(true)
-
-  const hoy = new Date().toISOString().split('T')[0]
-  const [params, setParams] = useState({
-    desde: hoy, hasta: hoy,
-    curso: '', notebook: '', sala: '',
-  })
-
-  // Cargar estadísticas al iniciar y en tiempo real
-  useEffect(() => {
-    cargarEstadisticas()
-
-    const canal = supabase
-      .channel('reportes_realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'accesos' }, cargarEstadisticas)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'accesos' }, cargarEstadisticas)
-      .subscribe()
-
-    return () => { supabase.removeChannel(canal) }
-  }, [params.desde, params.hasta])
-
-  async function cargarEstadisticas() {
-    setLoadingStats(true)
-    const desde = params.desde + 'T00:00:00'
-    const hasta = params.hasta + 'T23:59:59'
-
-    const { data: rows } = await supabase
-      .from('accesos')
-      .select('resultado, curso, notebook_id, timestamp_inicio')
-      .gte('timestamp_inicio', desde)
-      .lte('timestamp_inicio', hasta)
-
-    if (!rows) { setLoadingStats(false); return }
-
-    // Por resultado
-    const porResultado: Record<string, number> = {}
-    rows.forEach(r => { porResultado[r.resultado] = (porResultado[r.resultado] || 0) + 1 })
-    const resultadoLabels: Record<string, string> = {
-      exitoso: '✓ Exitoso', fallido: '✗ Fallido', override: '⊕ Override'
-    }
-    const resultados: DonutData[] = Object.entries(porResultado).map(([k, v], i) => ({
-      label: resultadoLabels[k] || k, value: v, color: COLORES_RESULTADO[i % COLORES_RESULTADO.length]
-    }))
-
-    // Por curso (top 8)
-    const porCurso: Record<string, number> = {}
-    rows.filter(r => r.resultado === 'exitoso').forEach(r => {
-      const c = r.curso || 'Sin curso'
-      porCurso[c] = (porCurso[c] || 0) + 1
-    })
-    const cursos: DonutData[] = Object.entries(porCurso)
-      .sort((a, b) => b[1] - a[1]).slice(0, 8)
-      .map(([k, v], i) => ({ label: k, value: v, color: COLORES_CURSOS[i % COLORES_CURSOS.length] }))
-
-    // Por notebook (top 8)
-    const porNotebook: Record<string, number> = {}
-    rows.forEach(r => {
-      const n = r.notebook_id || 'Desconocido'
-      porNotebook[n] = (porNotebook[n] || 0) + 1
-    })
-    const notebooks: DonutData[] = Object.entries(porNotebook)
-      .sort((a, b) => b[1] - a[1]).slice(0, 8)
-      .map(([k, v], i) => ({ label: k, value: v, color: COLORES_NOTEBOOKS[i % COLORES_NOTEBOOKS.length] }))
-
-    // Por hora del día
-    const porHora: Record<number, number> = {}
-    rows.forEach(r => {
-      const h = new Date(r.timestamp_inicio).getHours()
-      porHora[h] = (porHora[h] || 0) + 1
-    })
-    const porHoraData: DonutData[] = Object.entries(porHora)
-      .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([h, v], i) => ({
-        label: `${String(h).padStart(2, '0')}:00 hrs`,
-        value: v,
-        color: COLORES_HORA[Number(h) % COLORES_HORA.length]
-      }))
-
-    setStats({ resultados, cursos, notebooks, porHora: porHoraData })
-    setLoadingStats(false)
-  }
-
-  async function exportar(tipo: string) {
-    setGenerando(tipo)
-    try {
-      const XLSX = await import('xlsx')
-      let data: any[] = []
-
-      if (tipo === 'accesos' || tipo === 'fallidos') {
-        let q = supabase.from('accesos').select('*')
-          .gte('timestamp_inicio', params.desde + 'T00:00:00')
-          .lte('timestamp_inicio', params.hasta + 'T23:59:59')
-          .order('timestamp_inicio', { ascending: false })
-        if (tipo === 'fallidos') q = q.eq('resultado', 'fallido')
-        if (params.notebook) q = q.eq('notebook_id', params.notebook)
-        if (params.sala)     q = q.eq('sala', params.sala)
-        if (params.curso)    q = q.eq('curso', params.curso)
-        const { data: rows } = await q
-        data = (rows || []).map(r => ({
-          'Fecha':       new Date(r.timestamp_inicio).toLocaleDateString('es-CL'),
-          'Hora inicio': new Date(r.timestamp_inicio).toLocaleTimeString('es-CL'),
-          'Hora fin':    r.timestamp_fin ? new Date(r.timestamp_fin).toLocaleTimeString('es-CL') : '',
-          'Duración (min)': r.duracion_minutos || '',
-          'RUT':         r.rut || '',
-          'Nombre':      r.nombre || '',
-          'Curso':       r.curso || '',
-          'Notebook':    r.notebook_id || '',
-          'Sala':        r.sala || '',
-          'Resultado':   r.resultado,
-          'Tipo evento': r.tipo_evento,
-        }))
-      }
-
-      if (tipo === 'alertas') {
-        const { data: rows } = await supabase.from('alertas').select('*')
-          .gte('timestamp', params.desde + 'T00:00:00')
-          .lte('timestamp', params.hasta + 'T23:59:59')
-          .order('timestamp', { ascending: false })
-        data = (rows || []).map(r => ({
-          'Fecha':       new Date(r.timestamp).toLocaleDateString('es-CL'),
-          'Hora':        new Date(r.timestamp).toLocaleTimeString('es-CL'),
-          'Tipo':        r.tipo,
-          'Notebook':    r.notebook_id || '',
-          'RUT':         r.rut || '',
-          'Descripción': r.descripcion || '',
-          'Resuelta':    r.resuelta ? 'Sí' : 'No',
-        }))
-      }
-
-      if (tipo === 'uso_por_curso') {
-        const { data: rows } = await supabase.from('accesos').select('curso, resultado, duracion_minutos')
-          .gte('timestamp_inicio', params.desde + 'T00:00:00')
-          .lte('timestamp_inicio', params.hasta + 'T23:59:59')
-          .eq('resultado', 'exitoso')
-        const conteo: Record<string, { total: number; minutos: number }> = {}
-        for (const r of rows || []) {
-          const c = r.curso || 'Sin curso'
-          if (!conteo[c]) conteo[c] = { total: 0, minutos: 0 }
-          conteo[c].total++
-          conteo[c].minutos += r.duracion_minutos || 0
-        }
-        data = Object.entries(conteo).sort((a, b) => b[1].total - a[1].total)
-          .map(([curso, d]) => ({
-            'Curso': curso,
-            'Total accesos': d.total,
-            'Minutos totales': Math.round(d.minutos),
-          }))
-      }
-
-      if (data.length === 0) { alert('No hay datos para exportar.'); setGenerando(null); return }
-
-      const ws = XLSX.utils.json_to_sheet(data)
-      const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(wb, ws, tipo)
-      XLSX.writeFile(wb, `control_acceso_${tipo}_${params.desde}_${params.hasta}.xlsx`)
-    } catch (e) {
-      alert('Error al generar el reporte')
-    }
-    setGenerando(null)
-  }
-
-  const reportes = [
-    { id: 'accesos',       label: 'Todos los accesos',    desc: 'Historial completo con fecha, hora, duración', color: 'blue'  },
-    { id: 'fallidos',      label: 'Accesos fallidos',     desc: 'Solo los intentos rechazados',                 color: 'red'   },
-    { id: 'alertas',       label: 'Alertas de seguridad', desc: 'Eventos de alerta del período',                color: 'amber' },
-    { id: 'uso_por_curso', label: 'Uso por curso',        desc: 'Resumen de accesos y tiempo por curso',        color: 'green' },
-  ]
-  const colorMap: Record<string, string> = {
-    blue: 'border-blue-900/50 hover:border-blue-700', red: 'border-red-900/50 hover:border-red-700',
-    amber: 'border-amber-900/50 hover:border-amber-700', green: 'border-emerald-900/50 hover:border-emerald-700',
-  }
-  const iconMap: Record<string, string> = { blue: '≡', red: '✗', amber: '⚠', green: '◑' }
-
-  const totalAccesos = stats ? stats.resultados.reduce((s, d) => s + d.value, 0) : 0
-
-  return (
-    <div className="max-w-5xl mx-auto">
-      <div className="mb-7">
-        <h1 className="text-2xl font-semibold text-slate-100 mb-1">Reportes</h1>
-        <p className="text-slate-600 text-sm">Exportar datos y estadísticas en tiempo real</p>
+      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
+        <table className="tabla w-full">
+          <thead>
+            <tr>
+              <th>Tipo</th>
+              <th>Notebook</th>
+              <th>RUT</th>
+              <th>Descripción</th>
+              <th>Hora</th>
+              <th>Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <tr><td colSpan={6} className="text-center text-slate-600 py-10">Cargando...</td></tr>
+            ) : alertas.length === 0 ? (
+              <tr>
+                <td colSpan={6} className="text-center py-16">
+                  <div className="text-3xl mb-3 opacity-20">✓</div>
+                  <div className="text-slate-600 text-sm">Sin alertas pendientes</div>
+                </td>
+              </tr>
+            ) : alertas.map(a => (
+              <tr key={a.id} className={a.resuelta ? 'opacity-40' : ''}>
+                <td>
+                  <span className={`badge ${TIPO_BADGE[a.tipo] || 'badge-gray'}`}>
+                    {TIPO_LABEL[a.tipo] || a.tipo}
+                  </span>
+                </td>
+                <td className="font-mono text-xs">{a.notebook_id || '—'}</td>
+                <td className="font-mono text-xs">{a.rut || '—'}</td>
+                <td className="text-xs max-w-[220px] truncate" title={a.descripcion || ''}>
+                  {a.descripcion || '—'}
+                </td>
+                <td className="font-mono text-xs">
+                  {new Date(a.timestamp).toLocaleString('es-CL')}
+                </td>
+                <td>
+                  {a.resuelta ? (
+                    <span className="badge badge-green text-[10px]">✓ Resuelta</span>
+                  ) : a.tipo === 'duplicado' ? (
+                    <button
+                      onClick={() => abrirModalDuplicado(a)}
+                      className="text-xs text-purple-400 hover:text-purple-300 transition-colors font-medium">
+                      Gestionar →
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => resolver(a.id)}
+                      disabled={resolviendo === a.id}
+                      className="text-xs text-blue-500 hover:text-blue-300 disabled:opacity-50 transition-colors">
+                      {resolviendo === a.id ? '...' : 'Resolver'}
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
 
-      {/* Filtros */}
-      <div className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-5 mb-6">
-        <h3 className="text-slate-500 text-xs uppercase tracking-widest mb-4">Parámetros</h3>
-        <div className="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Desde</label>
-            <input type="date" className="input-dark" value={params.desde}
-              onChange={e => setParams(p => ({ ...p, desde: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Hasta</label>
-            <input type="date" className="input-dark" value={params.hasta}
-              onChange={e => setParams(p => ({ ...p, hasta: e.target.value }))} />
-          </div>
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Curso</label>
-            <input className="input-dark" placeholder="3° A Medio" value={params.curso}
-              onChange={e => setParams(p => ({ ...p, curso: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Notebook</label>
-            <input className="input-dark" placeholder="NB-SALA-01" value={params.notebook}
-              onChange={e => setParams(p => ({ ...p, notebook: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Sala</label>
-            <input className="input-dark" placeholder="Sala de Computacion" value={params.sala}
-              onChange={e => setParams(p => ({ ...p, sala: e.target.value }))} />
-          </div>
-        </div>
-      </div>
+      {/* Modal duplicado */}
+      {modal && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#0d1520] border border-purple-900/50 rounded-2xl p-7 w-full max-w-md">
+            <h2 className="text-slate-100 font-semibold text-lg mb-1">Acceso duplicado</h2>
+            <p className="text-slate-500 text-sm mb-5">
+              RUT <span className="text-slate-300 font-mono">{modal.alerta.rut}</span> tiene sesiones en múltiples equipos.
+            </p>
 
-      {/* Cards exportar */}
-      <div className="grid grid-cols-2 gap-4 mb-10">
-        {reportes.map(r => (
-          <button key={r.id} onClick={() => exportar(r.id)} disabled={generando === r.id}
-            className={`text-left bg-[#0d1520] border rounded-xl p-5 transition-colors ${colorMap[r.color]} ${generando === r.id ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}>
-            <div className="text-2xl mb-3 opacity-40">{iconMap[r.color]}</div>
-            <div className="text-slate-200 font-medium text-sm mb-1">{r.label}</div>
-            <div className="text-slate-600 text-xs mb-4">{r.desc}</div>
-            <div className={`text-xs font-semibold ${generando === r.id ? 'text-slate-500' : 'text-blue-500'}`}>
-              {generando === r.id ? 'Generando...' : '↓ Exportar .xlsx'}
+            {modal.sesiones.length > 0 ? (
+              <div className="mb-5 space-y-2">
+                <p className="text-slate-500 text-xs uppercase tracking-widest mb-2">
+                  Sesiones activas ({modal.sesiones.length})
+                </p>
+                {modal.sesiones.map(s => (
+                  <div key={s.notebook_id}
+                    className="flex items-center justify-between bg-[#111c2d] rounded-lg px-4 py-3">
+                    <div>
+                      <div className="text-slate-300 text-sm font-mono">{s.notebook_id}</div>
+                      <div className="text-slate-600 text-xs">
+                        Desde {new Date(s.inicio).toLocaleTimeString('es-CL')}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => cerrarSesionNotebook(s.notebook_id, modal.alerta.id)}
+                      disabled={cerrandoSesion !== null}
+                      className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
+                      {cerrandoSesion === s.notebook_id ? 'Cerrando...' : 'Cerrar sesión'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="mb-5 bg-[#111c2d] rounded-lg px-4 py-3 text-slate-500 text-sm">
+                No hay sesiones activas en este momento
+              </div>
+            )}
+
+            <div className="space-y-2">
+              {modal.sesiones.length > 1 && (
+                <button
+                  onClick={() => cerrarTodasSesiones(modal.alerta.rut!, modal.alerta.id)}
+                  disabled={cerrandoSesion !== null}
+                  className="w-full bg-red-900/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
+                  {cerrandoSesion === 'todas' ? 'Cerrando todas...' : 'Cerrar todas las sesiones'}
+                </button>
+              )}
+              <button
+                onClick={() => { resolver(modal.alerta.id); setModal(null) }}
+                disabled={resolviendo !== null}
+                className="w-full border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
+                {resolviendo ? 'Marcando...' : 'Solo marcar como resuelta'}
+              </button>
+              <button
+                onClick={() => setModal(null)}
+                className="w-full text-slate-600 hover:text-slate-400 text-xs py-2 transition-colors">
+                Cancelar
+              </button>
             </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Gráficos donut */}
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-slate-200 font-semibold text-lg">Estadísticas visuales</h2>
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-          Actualizando en tiempo real
-        </div>
-      </div>
-
-      {loadingStats ? (
-        <div className="text-slate-600 text-sm text-center py-12">Cargando estadísticas...</div>
-      ) : !stats ? null : (
-        <div className="grid grid-cols-2 gap-5">
-          <DonutChart
-            data={stats.resultados}
-            titulo="Resultados de acceso"
-            total={totalAccesos}
-          />
-          <DonutChart
-            data={stats.cursos}
-            titulo="Accesos por curso"
-            total={stats.cursos.reduce((s, d) => s + d.value, 0)}
-          />
-          <DonutChart
-            data={stats.notebooks}
-            titulo="Uso por notebook"
-            total={stats.notebooks.reduce((s, d) => s + d.value, 0)}
-          />
-          <DonutChart
-            data={stats.porHora}
-            titulo="Accesos por hora del día"
-            total={stats.porHora.reduce((s, d) => s + d.value, 0)}
-          />
+          </div>
         </div>
       )}
     </div>
