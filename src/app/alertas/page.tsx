@@ -68,10 +68,23 @@ export default function AlertasPage() {
   }
 
   // Cerrar sesión de un notebook específico
+  // Marca forzar_cierre=true → el kiosk detecta y vuelve al login en 3 segundos
   async function cerrarSesionNotebook(notebook_id: string, alertaId: string) {
     setCerrandoSesion(notebook_id)
+
+    // Señal al kiosk para que cierre la sesión
+    await supabase
+      .from('sesiones_activas')
+      .update({ forzar_cierre: true })
+      .eq('notebook_id', notebook_id)
+
+    // Esperar 4 segundos para que el kiosk procese y cierre
+    await new Promise(r => setTimeout(r, 4000))
+
+    // El kiosk ya cerró su sesión — eliminar el registro
     await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
-    // Marcar acceso como cerrado
+
+    // Cerrar el acceso activo
     const { data: accesos } = await supabase
       .from('accesos')
       .select('id')
@@ -84,6 +97,7 @@ export default function AlertasPage() {
         timestamp_fin: new Date().toISOString()
       }).eq('id', accesos[0].id)
     }
+
     await resolver(alertaId)
     setModal(null)
     setCerrandoSesion(null)
@@ -92,6 +106,16 @@ export default function AlertasPage() {
   // Cerrar todas las sesiones del RUT
   async function cerrarTodasSesiones(rut: string, alertaId: string) {
     setCerrandoSesion('todas')
+
+    // Señal a todos los kiosks con ese RUT
+    await supabase
+      .from('sesiones_activas')
+      .update({ forzar_cierre: true })
+      .eq('rut', rut)
+
+    // Esperar 4 segundos para que los kiosks procesen
+    await new Promise(r => setTimeout(r, 4000))
+
     // Cerrar accesos abiertos
     const { data: accesos } = await supabase
       .from('accesos')
@@ -105,6 +129,7 @@ export default function AlertasPage() {
         }).eq('id', a.id)
       }
     }
+
     // Eliminar todas las sesiones activas del RUT
     await supabase.from('sesiones_activas').delete().eq('rut', rut)
     await resolver(alertaId)
@@ -221,7 +246,7 @@ export default function AlertasPage() {
                       onClick={() => cerrarSesionNotebook(s.notebook_id, modal.alerta.id)}
                       disabled={cerrandoSesion !== null}
                       className="text-xs text-red-500 hover:text-red-300 border border-red-900/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
-                      {cerrandoSesion === s.notebook_id ? 'Cerrando...' : 'Cerrar sesión'}
+                      {cerrandoSesion === s.notebook_id ? 'Enviando señal...' : 'Cerrar sesión'}
                     </button>
                   </div>
                 ))}
@@ -234,7 +259,7 @@ export default function AlertasPage() {
                 onClick={() => cerrarTodasSesiones(modal.alerta.rut!, modal.alerta.id)}
                 disabled={cerrandoSesion !== null}
                 className="w-full bg-red-900/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
-                {cerrandoSesion === 'todas' ? 'Cerrando todas...' : 'Cerrar todas las sesiones'}
+                {cerrandoSesion === 'todas' ? 'Enviando señal a todos...' : 'Cerrar todas las sesiones'}
               </button>
               <button
                 onClick={() => { resolver(modal.alerta.id); setModal(null) }}
