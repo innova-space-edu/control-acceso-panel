@@ -15,49 +15,82 @@ const TIPO_BADGE: Record<string, string> = {
   sospechoso:      'badge-red',
 }
 
+interface SesionActiva {
+  notebook_id: string
+  rut: string
+  inicio: string
+}
+
 interface ModalDuplicado {
   alerta: Alerta
-  sesiones: { notebook_id: string; rut: string; inicio: string }[]
+  sesiones: SesionActiva[]
 }
 
 export default function AlertasPage() {
-  const [alertas, setAlertas]       = useState<Alerta[]>([])
-  const [loading, setLoading]       = useState(true)
-  const [filtro, setFiltro]         = useState<'pendientes' | 'todas'>('pendientes')
-  const [resolviendo, setResolviendo] = useState<string | null>(null)
-  const [modal, setModal]           = useState<ModalDuplicado | null>(null)
+  const [alertas, setAlertas]           = useState<Alerta[]>([])
+  const [loading, setLoading]           = useState(true)
+  const [filtro, setFiltro]             = useState<'pendientes' | 'todas'>('pendientes')
+  const [resolviendo, setResolviendo]   = useState<string | null>(null)
+  const [modal, setModal]               = useState<ModalDuplicado | null>(null)
   const [cerrandoSesion, setCerrandoSesion] = useState<string | null>(null)
+  const [msgError, setMsgError]         = useState('')
+  const [msgExito, setMsgExito]         = useState('')
 
   useEffect(() => {
     cargar()
     const canal = supabase
       .channel('alertas_live')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'alertas' }, () => cargar())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'alertas' }, () => cargar())
       .subscribe()
     return () => { supabase.removeChannel(canal) }
   }, [filtro])
 
   async function cargar() {
+    setLoading(true)
     let q = supabase.from('alertas').select('*').order('timestamp', { ascending: false }).limit(100)
     if (filtro === 'pendientes') q = q.eq('resuelta', false)
-    const { data } = await q
-    setAlertas(data || [])
+    const { data, error } = await q
+    if (error) {
+      setMsgError('Error al cargar alertas: ' + error.message)
+    } else {
+      setAlertas(data || [])
+      setMsgError('')
+    }
     setLoading(false)
   }
 
   async function resolver(id: string) {
     setResolviendo(id)
-    await supabase.from('alertas').update({ resuelta: true }).eq('id', id)
-    await cargar()
+    setMsgError('')
+    const { error } = await supabase
+      .from('alertas')
+      .update({ resuelta: true })
+      .eq('id', id)
+    if (error) {
+      setMsgError('Error al resolver: ' + error.message)
+    } else {
+      setMsgExito('Alerta marcada como resuelta')
+      setTimeout(() => setMsgExito(''), 3000)
+      await cargar()
+    }
     setResolviendo(null)
   }
 
   async function resolverTodas() {
-    await supabase.from('alertas').update({ resuelta: true }).eq('resuelta', false)
-    await cargar()
+    setMsgError('')
+    const { error } = await supabase
+      .from('alertas')
+      .update({ resuelta: true })
+      .eq('resuelta', false)
+    if (error) {
+      setMsgError('Error al resolver todas: ' + error.message)
+    } else {
+      setMsgExito('Todas las alertas resueltas')
+      setTimeout(() => setMsgExito(''), 3000)
+      await cargar()
+    }
   }
 
-  // Abrir modal con opciones para alertas de duplicado
   async function abrirModalDuplicado(alerta: Alerta) {
     if (!alerta.rut) return
     const { data } = await supabase
@@ -67,24 +100,26 @@ export default function AlertasPage() {
     setModal({ alerta, sesiones: data || [] })
   }
 
-  // Cerrar sesión de un notebook específico
-  // Marca forzar_cierre=true → el kiosk detecta y vuelve al login en 3 segundos
   async function cerrarSesionNotebook(notebook_id: string, alertaId: string) {
     setCerrandoSesion(notebook_id)
+    setMsgError('')
 
-    // Señal al kiosk para que cierre la sesión
-    await supabase
+    // Señal al kiosk: forzar_cierre = true
+    const { error: e1 } = await supabase
       .from('sesiones_activas')
       .update({ forzar_cierre: true })
       .eq('notebook_id', notebook_id)
 
-    // Esperar 4 segundos para que el kiosk procese y cierre
-    await new Promise(r => setTimeout(r, 4000))
+    if (e1) {
+      // Si forzar_cierre no existe, eliminar directamente
+      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
+    } else {
+      // Esperar que el kiosk procese
+      await new Promise(r => setTimeout(r, 4000))
+      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
+    }
 
-    // El kiosk ya cerró su sesión — eliminar el registro
-    await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
-
-    // Cerrar el acceso activo
+    // Cerrar acceso activo
     const { data: accesos } = await supabase
       .from('accesos')
       .select('id')
@@ -93,28 +128,30 @@ export default function AlertasPage() {
       .order('timestamp_inicio', { ascending: false })
       .limit(1)
     if (accesos && accesos.length > 0) {
-      await supabase.from('accesos').update({
-        timestamp_fin: new Date().toISOString()
-      }).eq('id', accesos[0].id)
+      await supabase.from('accesos')
+        .update({ timestamp_fin: new Date().toISOString() })
+        .eq('id', accesos[0].id)
     }
 
     await resolver(alertaId)
     setModal(null)
     setCerrandoSesion(null)
+    setMsgExito('Sesión cerrada correctamente')
+    setTimeout(() => setMsgExito(''), 3000)
   }
 
-  // Cerrar todas las sesiones del RUT
   async function cerrarTodasSesiones(rut: string, alertaId: string) {
     setCerrandoSesion('todas')
+    setMsgError('')
 
-    // Señal a todos los kiosks con ese RUT
-    await supabase
+    const { error: e1 } = await supabase
       .from('sesiones_activas')
       .update({ forzar_cierre: true })
       .eq('rut', rut)
 
-    // Esperar 4 segundos para que los kiosks procesen
-    await new Promise(r => setTimeout(r, 4000))
+    if (!e1) {
+      await new Promise(r => setTimeout(r, 4000))
+    }
 
     // Cerrar accesos abiertos
     const { data: accesos } = await supabase
@@ -124,17 +161,18 @@ export default function AlertasPage() {
       .is('timestamp_fin', null)
     if (accesos) {
       for (const a of accesos) {
-        await supabase.from('accesos').update({
-          timestamp_fin: new Date().toISOString()
-        }).eq('id', a.id)
+        await supabase.from('accesos')
+          .update({ timestamp_fin: new Date().toISOString() })
+          .eq('id', a.id)
       }
     }
 
-    // Eliminar todas las sesiones activas del RUT
     await supabase.from('sesiones_activas').delete().eq('rut', rut)
     await resolver(alertaId)
     setModal(null)
     setCerrandoSesion(null)
+    setMsgExito('Todas las sesiones cerradas')
+    setTimeout(() => setMsgExito(''), 3000)
   }
 
   const pendientes = alertas.filter(a => !a.resuelta)
@@ -156,13 +194,27 @@ export default function AlertasPage() {
           <div className="flex rounded-lg overflow-hidden border border-[#1a2a40]">
             {(['pendientes', 'todas'] as const).map(f => (
               <button key={f} onClick={() => setFiltro(f)}
-                className={`px-4 py-2 text-xs font-medium transition-colors ${filtro === f ? 'bg-blue-900/40 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}>
+                className={`px-4 py-2 text-xs font-medium transition-colors ${
+                  filtro === f ? 'bg-blue-900/40 text-blue-400' : 'text-slate-500 hover:text-slate-300'
+                }`}>
                 {f === 'pendientes' ? `Pendientes (${pendientes.length})` : 'Todas'}
               </button>
             ))}
           </div>
         </div>
       </div>
+
+      {/* Mensajes */}
+      {msgError && (
+        <div className="bg-red-950/30 border border-red-900/50 rounded-xl px-5 py-3 mb-4 text-red-400 text-sm">
+          {msgError}
+        </div>
+      )}
+      {msgExito && (
+        <div className="bg-emerald-950/30 border border-emerald-900/50 rounded-xl px-5 py-3 mb-4 text-emerald-400 text-sm">
+          ✓ {msgExito}
+        </div>
+      )}
 
       <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
         <table className="tabla w-full">
@@ -195,11 +247,15 @@ export default function AlertasPage() {
                 </td>
                 <td className="font-mono text-xs">{a.notebook_id || '—'}</td>
                 <td className="font-mono text-xs">{a.rut || '—'}</td>
-                <td className="text-xs max-w-[220px] truncate">{a.descripcion || '—'}</td>
-                <td className="font-mono text-xs">{new Date(a.timestamp).toLocaleString('es-CL')}</td>
+                <td className="text-xs max-w-[220px] truncate" title={a.descripcion || ''}>
+                  {a.descripcion || '—'}
+                </td>
+                <td className="font-mono text-xs">
+                  {new Date(a.timestamp).toLocaleString('es-CL')}
+                </td>
                 <td>
                   {a.resuelta ? (
-                    <span className="badge badge-green text-[10px]">Resuelta</span>
+                    <span className="badge badge-green text-[10px]">✓ Resuelta</span>
                   ) : a.tipo === 'duplicado' ? (
                     <button
                       onClick={() => abrirModalDuplicado(a)}
@@ -210,8 +266,8 @@ export default function AlertasPage() {
                     <button
                       onClick={() => resolver(a.id)}
                       disabled={resolviendo === a.id}
-                      className="text-xs text-blue-500 hover:text-blue-300 disabled:text-slate-600 transition-colors">
-                      {resolviendo === a.id ? 'Resolviendo...' : 'Resolver'}
+                      className="text-xs text-blue-500 hover:text-blue-300 disabled:opacity-50 transition-colors">
+                      {resolviendo === a.id ? '...' : 'Resolver'}
                     </button>
                   )}
                 </td>
@@ -221,21 +277,23 @@ export default function AlertasPage() {
         </table>
       </div>
 
-      {/* Modal para duplicados */}
+      {/* Modal duplicado */}
       {modal && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-[#0d1520] border border-purple-900/50 rounded-2xl p-7 w-full max-w-md">
-            <h2 className="text-slate-100 font-semibold text-lg mb-1">Acceso duplicado detectado</h2>
+            <h2 className="text-slate-100 font-semibold text-lg mb-1">Acceso duplicado</h2>
             <p className="text-slate-500 text-sm mb-5">
-              RUT <span className="text-slate-300 font-mono">{modal.alerta.rut}</span> tiene sesiones activas en múltiples equipos.
+              RUT <span className="text-slate-300 font-mono">{modal.alerta.rut}</span> tiene sesiones en múltiples equipos.
             </p>
 
-            {/* Sesiones activas del RUT */}
-            {modal.sesiones.length > 0 && (
+            {modal.sesiones.length > 0 ? (
               <div className="mb-5 space-y-2">
-                <p className="text-slate-500 text-xs uppercase tracking-widest mb-2">Sesiones activas</p>
+                <p className="text-slate-500 text-xs uppercase tracking-widest mb-2">
+                  Sesiones activas ({modal.sesiones.length})
+                </p>
                 {modal.sesiones.map(s => (
-                  <div key={s.notebook_id} className="flex items-center justify-between bg-[#111c2d] rounded-lg px-4 py-3">
+                  <div key={s.notebook_id}
+                    className="flex items-center justify-between bg-[#111c2d] rounded-lg px-4 py-3">
                     <div>
                       <div className="text-slate-300 text-sm font-mono">{s.notebook_id}</div>
                       <div className="text-slate-600 text-xs">
@@ -245,26 +303,32 @@ export default function AlertasPage() {
                     <button
                       onClick={() => cerrarSesionNotebook(s.notebook_id, modal.alerta.id)}
                       disabled={cerrandoSesion !== null}
-                      className="text-xs text-red-500 hover:text-red-300 border border-red-900/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
-                      {cerrandoSesion === s.notebook_id ? 'Enviando señal...' : 'Cerrar sesión'}
+                      className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
+                      {cerrandoSesion === s.notebook_id ? 'Cerrando...' : 'Cerrar sesión'}
                     </button>
                   </div>
                 ))}
               </div>
+            ) : (
+              <div className="mb-5 bg-[#111c2d] rounded-lg px-4 py-3 text-slate-500 text-sm">
+                No hay sesiones activas en este momento
+              </div>
             )}
 
-            {/* Opciones */}
             <div className="space-y-2">
-              <button
-                onClick={() => cerrarTodasSesiones(modal.alerta.rut!, modal.alerta.id)}
-                disabled={cerrandoSesion !== null}
-                className="w-full bg-red-900/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
-                {cerrandoSesion === 'todas' ? 'Enviando señal a todos...' : 'Cerrar todas las sesiones'}
-              </button>
+              {modal.sesiones.length > 1 && (
+                <button
+                  onClick={() => cerrarTodasSesiones(modal.alerta.rut!, modal.alerta.id)}
+                  disabled={cerrandoSesion !== null}
+                  className="w-full bg-red-900/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
+                  {cerrandoSesion === 'todas' ? 'Cerrando todas...' : 'Cerrar todas las sesiones'}
+                </button>
+              )}
               <button
                 onClick={() => { resolver(modal.alerta.id); setModal(null) }}
-                className="w-full border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors">
-                Solo marcar como resuelta
+                disabled={resolviendo !== null}
+                className="w-full border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
+                {resolviendo ? 'Marcando...' : 'Solo marcar como resuelta'}
               </button>
               <button
                 onClick={() => setModal(null)}
