@@ -260,7 +260,7 @@ export default function ReportesPage() {
     const porHoraData: DonutData[] = Object.entries(porHora)
       .sort((a, b) => Number(a[0]) - Number(b[0]))
       .map(([h, v], i) => ({
-        label: `${h.padStart ? h : h}:00 hrs`,
+        label: `${String(h).padStart(2, '0')}:00 hrs`,
         value: v,
         color: COLORES_HORA[Number(h) % COLORES_HORA.length]
       }))
