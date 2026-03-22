@@ -10,6 +10,7 @@ const nav = [
   { href: '/monitor',   icon: '◉', label: 'Monitor'     },
   { href: '/alertas',   icon: '⚠', label: 'Alertas'     },
   { href: '/override',  icon: '⊕', label: 'Override'    },
+  { href: '/examenes',  icon: '✎', label: 'Exámenes'    },
   { href: '/historial', icon: '≡', label: 'Historial'   },
   { href: '/gestion',   icon: '✦', label: 'Gestión'     },
   { href: '/reportes',  icon: '↓', label: 'Reportes'    },
@@ -61,8 +62,9 @@ export default function Sidebar() {
             >
               <span className="text-base w-5 text-center">{icon}</span>
               {label}
-              {href === '/alertas'  && <AlertBadge />}
-              {href === '/override' && <OverrideBadge />}
+              {href === '/alertas'   && <AlertBadge />}
+              {href === '/override'  && <OverrideBadge />}
+              {href === '/examenes'  && <ExamenesBadge />}
             </Link>
           )
         })}
@@ -119,6 +121,30 @@ function OverrideBadge() {
   if (!count) return null
   return (
     <span className="ml-auto bg-purple-900 text-purple-400 text-[10px] font-bold px-1.5 py-0.5 rounded-full ping-slow">
+      {count}
+    </span>
+  )
+}
+
+function ExamenesBadge() {
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    async function load() {
+      const { count: c } = await supabase
+        .from('examenes_kiosk')
+        .select('*', { count: 'exact', head: true })
+        .eq('estado', 'activo')
+      setCount(c || 0)
+    }
+    load()
+    const iv = setInterval(load, 8000)
+    return () => clearInterval(iv)
+  }, [])
+
+  if (!count) return null
+  return (
+    <span className="ml-auto bg-blue-900 text-blue-400 text-[10px] font-bold px-1.5 py-0.5 rounded-full animate-pulse">
       {count}
     </span>
   )
