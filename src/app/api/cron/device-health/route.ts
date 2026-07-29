@@ -5,11 +5,12 @@ export const runtime = 'nodejs'
 
 export async function GET(request: NextRequest) {
   const configuredSecret = process.env.CRON_SECRET
-  if (configuredSecret) {
-    const auth = request.headers.get('authorization')
-    if (auth !== `Bearer ${configuredSecret}`) {
-      return NextResponse.json({ ok: false, message: 'No autorizado' }, { status: 401 })
-    }
+  if (!configuredSecret) {
+    return NextResponse.json({ ok: false, message: 'CRON_SECRET no está configurado' }, { status: 503 })
+  }
+  const auth = request.headers.get('authorization')
+  if (auth !== `Bearer ${configuredSecret}`) {
+    return NextResponse.json({ ok: false, message: 'No autorizado' }, { status: 401 })
   }
 
   const admin = createSupabaseAdmin()
