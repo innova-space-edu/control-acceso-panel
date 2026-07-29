@@ -27,7 +27,15 @@ export async function POST(request: NextRequest) {
 
   const now = new Date().toISOString()
   const publicIp = String(body.ip_public || getRequestIp(request.headers) || '') || null
-  const state = {
+  const { data: previous } = await admin.from('dispositivos_estado').select('*').eq('notebook_id', notebook.id).maybeSingle()
+  const previousData = previous?.datos && typeof previous.datos === 'object'
+    ? previous.datos as Record<string, unknown>
+    : {}
+  const incomingData = typeof body.datos === 'object' && body.datos
+    ? body.datos as Record<string, unknown>
+    : {}
+
+  const stateBase = {
     notebook_id: notebook.id,
     online: true,
     ultima_senal: now,
@@ -44,11 +52,27 @@ export async function POST(request: NextRequest) {
     kiosk_activo: typeof body.kiosk_activo === 'boolean' ? body.kiosk_activo : null,
     examen_activo: typeof body.examen_activo === 'boolean' ? body.examen_activo : null,
     latencia_ms: typeof body.latencia_ms === 'number' ? body.latencia_ms : null,
-    datos: typeof body.datos === 'object' && body.datos ? body.datos : {},
     actualizado_en: now,
   }
 
-  const { data: previous } = await admin.from('dispositivos_estado').select('*').eq('notebook_id', notebook.id).maybeSingle()
+  const importantChange = !previous
+    || previous.online === false
+    || previous.ip_public !== publicIp
+    || previous.usuario_sistema !== stateBase.usuario_sistema
+    || previous.examen_activo !== stateBase.examen_activo
+  const lastStoredAt = previousData.last_stored_heartbeat
+  const parsedLastStored = lastStoredAt ? new Date(String(lastStoredAt)).getTime() : Number.NaN
+  const storeByTime = !Number.isFinite(parsedLastStored) || Date.now() - parsedLastStored > 15 * 60_000
+  const shouldStoreHeartbeat = importantChange || storeByTime
+  const state = {
+    ...stateBase,
+    datos: {
+      ...previousData,
+      ...incomingData,
+      ...(shouldStoreHeartbeat ? { last_stored_heartbeat: now } : {}),
+    },
+  }
+
   const { error: stateError } = await admin.from('dispositivos_estado').upsert(state)
   if (stateError) return NextResponse.json({ ok: false, message: stateError.message }, { status: 500 })
 
@@ -60,11 +84,7 @@ export async function POST(request: NextRequest) {
     await admin.from('notebooks').update(notebookPatch).eq('id', notebook.id)
   }
 
-  const importantChange = !previous || previous.online === false || previous.ip_public !== publicIp || previous.usuario_sistema !== state.usuario_sistema || previous.examen_activo !== state.examen_activo
-  const lastStoredAt = previous?.datos && typeof previous.datos === 'object' ? (previous.datos as Record<string, unknown>).last_stored_heartbeat : null
-  const storeByTime = !lastStoredAt || Date.now() - new Date(String(lastStoredAt)).getTime() > 15 * 60_000
-
-  if (importantChange || storeByTime) {
+  if (shouldStoreHeartbeat) {
     await admin.from('dispositivos_heartbeats').insert({
       notebook_id: notebook.id,
       fecha_hora_dispositivo: body.fecha_hora_dispositivo || null,
@@ -78,9 +98,6 @@ export async function POST(request: NextRequest) {
       examen_activo: state.examen_activo,
       cambios: { previous_online: previous?.online ?? null, important_change: importantChange },
     })
-    await admin.from('dispositivos_estado').update({
-      datos: { ...(state.datos as Record<string, unknown>), last_stored_heartbeat: now },
-    }).eq('notebook_id', notebook.id)
   }
 
   const wasOffline = previous && previous.online === false
