@@ -5,9 +5,26 @@ import { createDeviceToken, hashDeviceToken } from '@/lib/security'
 export const runtime = 'nodejs'
 
 type Json = Record<string, unknown>
+type NotebookRow = { id: string }
+type OverrideRow = {
+  id: string
+  notebook_id: string
+  rut_override?: string | null
+  nombre_override?: string | null
+  curso_override?: string | null
+}
 
 function errorResponse(message: string, status = 400, details?: unknown) {
   return NextResponse.json({ ok: false, message, details }, { status })
+}
+
+function errorDetails(error: unknown) {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object') {
+    const value = error as Record<string, unknown>
+    return [value.message, value.details, value.hint, value.code].filter(Boolean).map(String).join(' · ') || JSON.stringify(error)
+  }
+  return String(error || 'Error desconocido')
 }
 
 export async function POST(request: NextRequest) {
@@ -17,12 +34,20 @@ export async function POST(request: NextRequest) {
 
   const body = await request.json().catch(() => ({})) as Json
   const action = String(body.action || '')
-  const admin = createSupabaseAdmin()
   const actorName = auth.profile.nombre || auth.user.email || 'Administrador'
 
   try {
+    // En producción se usa SERVICE_ROLE. Si la variable aún no está configurada,
+    // el cliente autenticado continúa funcionando bajo las políticas RLS de administrador.
+    let admin: any = auth.supabase
+    try {
+      admin = createSupabaseAdmin()
+    } catch (configurationError) {
+      console.warn('SUPABASE_SERVICE_ROLE_KEY no disponible; usando sesión administrativa con RLS.', configurationError)
+    }
+
     if (action === 'command') {
-      const notebookIds = Array.isArray(body.notebook_ids)
+      const requestedNotebookIds: string[] = Array.isArray(body.notebook_ids)
         ? [...new Set(body.notebook_ids.map(String).filter(Boolean))]
         : []
       const type = String(body.type || '')
@@ -30,8 +55,18 @@ export async function POST(request: NextRequest) {
       const payload = (body.payload && typeof body.payload === 'object' ? body.payload : {}) as Json
       const expiryMinutes = Math.max(1, Math.min(1440, Number(body.expiry_minutes || 15)))
 
-      if (!notebookIds.length || !type) return errorResponse('Selecciona al menos un notebook y un tipo de comando')
+      if (!requestedNotebookIds.length || !type) return errorResponse('Selecciona al menos un notebook y un tipo de comando')
       if (!reason) return errorResponse('El motivo es obligatorio')
+
+      const { data: existingNotebooks, error: notebookError } = await admin
+        .from('notebooks')
+        .select('id')
+        .in('id', requestedNotebookIds)
+      if (notebookError) throw notebookError
+
+      const notebookIds: string[] = ((existingNotebooks || []) as NotebookRow[]).map(item => item.id)
+      const missingNotebookIds = requestedNotebookIds.filter(id => !notebookIds.includes(id))
+      if (!notebookIds.length) return errorResponse('Los notebooks seleccionados no existen en el inventario', 404, missingNotebookIds.join(', '))
 
       const { data: lot, error: lotError } = await admin.from('comandos_lotes').insert({
         tipo: type,
@@ -43,7 +78,7 @@ export async function POST(request: NextRequest) {
       if (lotError) throw lotError
 
       const expiresAt = new Date(Date.now() + expiryMinutes * 60_000).toISOString()
-      const commands = notebookIds.map(notebookId => ({
+      const commands = notebookIds.map((notebookId: string) => ({
         lote_id: lot.id,
         notebook_id: notebookId,
         tipo: type,
@@ -57,7 +92,7 @@ export async function POST(request: NextRequest) {
       const { data, error } = await admin.from('comandos_remotos').insert(commands).select('*')
       if (error) throw error
 
-      await admin.from('eventos_sistema').insert(notebookIds.map(notebookId => ({
+      const { error: eventError } = await admin.from('eventos_sistema').insert(notebookIds.map((notebookId: string) => ({
         categoria: 'dispositivo',
         tipo_evento: `comando_${type}`,
         severidad: ['bloquear', 'modo_robado'].includes(type) ? 'alta' : 'informativa',
@@ -69,72 +104,138 @@ export async function POST(request: NextRequest) {
         origen: 'api_admin',
         datos: { lote_id: lot.id, payload },
       })))
+      if (eventError) console.warn('No fue posible registrar todos los eventos del comando', eventError)
 
-      return NextResponse.json({ ok: true, lote_id: lot.id, commands: data })
+      return NextResponse.json({
+        ok: true,
+        lote_id: lot.id,
+        commands: data,
+        warnings: missingNotebookIds.length ? [`No se enviaron comandos a: ${missingNotebookIds.join(', ')}`] : [],
+      })
     }
 
     if (action === 'bulk_override') {
-      const requestIds = Array.isArray(body.request_ids) ? body.request_ids.map(String).filter(Boolean) : []
+      const requestIds: string[] = Array.isArray(body.request_ids)
+        ? [...new Set(body.request_ids.map(String).filter(Boolean))]
+        : []
       const decision = String(body.decision || '')
       const reason = String(body.reason || '').trim()
       const duration = Math.max(1, Math.min(1440, Number(body.duration_minutes || 60)))
       if (!requestIds.length || !['aprobado', 'rechazado'].includes(decision)) return errorResponse('Solicitud o decisión inválida')
       if (!reason) return errorResponse('El motivo es obligatorio')
 
-      const { data: requests, error: requestError } = await admin
+      const { data: requestData, error: requestError } = await admin
         .from('solicitudes_override')
         .select('*')
         .in('id', requestIds)
+        .eq('estado', 'pendiente')
       if (requestError) throw requestError
-      if (!requests?.length) return errorResponse('No se encontraron solicitudes pendientes', 404)
+      const requests = (requestData || []) as OverrideRow[]
+      if (!requests.length) return errorResponse('No se encontraron solicitudes pendientes', 404)
 
+      const warnings: string[] = []
       let lotId: string | null = null
       const commandByNotebook = new Map<string, string>()
+
       if (decision === 'aprobado') {
-        const notebookIds = [...new Set(requests.map(r => r.notebook_id).filter(Boolean))]
-        const { data: lot, error: lotError } = await admin.from('comandos_lotes').insert({
-          tipo: 'desbloquear', motivo: reason, solicitado_por: auth.user.id,
-          solicitado_por_nombre: actorName, total: notebookIds.length,
-        }).select('id').single()
-        if (lotError) throw lotError
-        lotId = lot.id
-        const { data: commands, error: commandError } = await admin.from('comandos_remotos').insert(
-          notebookIds.map(notebookId => ({
-            lote_id: lot.id,
-            notebook_id: notebookId,
-            tipo: 'desbloquear',
-            motivo: reason,
-            payload: { duration_minutes: duration },
-            solicitado_por: auth.user.id,
-            solicitado_por_nombre: actorName,
-            expira_en: new Date(Date.now() + 15 * 60_000).toISOString(),
-          }))
-        ).select('id, notebook_id')
-        if (commandError) throw commandError
-        commands?.forEach(c => commandByNotebook.set(c.notebook_id, c.id))
+        const requestedNotebookIds: string[] = [...new Set(requests.map(item => String(item.notebook_id || '')).filter(Boolean))]
+        const { data: inventoryRows, error: inventoryError } = requestedNotebookIds.length
+          ? await admin.from('notebooks').select('id').in('id', requestedNotebookIds)
+          : { data: [], error: null }
+
+        if (inventoryError) {
+          warnings.push(`No fue posible validar el inventario: ${errorDetails(inventoryError)}`)
+        } else {
+          const notebookIds: string[] = ((inventoryRows || []) as NotebookRow[]).map(item => item.id)
+          const missingNotebookIds = requestedNotebookIds.filter(id => !notebookIds.includes(id))
+          if (missingNotebookIds.length) {
+            warnings.push(`Solicitudes antiguas sin notebook registrado: ${missingNotebookIds.join(', ')}`)
+          }
+
+          if (notebookIds.length) {
+            try {
+              const { data: lot, error: lotError } = await admin.from('comandos_lotes').insert({
+                tipo: 'desbloquear',
+                motivo: reason,
+                solicitado_por: auth.user.id,
+                solicitado_por_nombre: actorName,
+                total: notebookIds.length,
+              }).select('id').single()
+              if (lotError) throw lotError
+
+              lotId = lot.id
+              const { data: commands, error: commandError } = await admin.from('comandos_remotos').insert(
+                notebookIds.map((notebookId: string) => ({
+                  lote_id: lot.id,
+                  notebook_id: notebookId,
+                  tipo: 'desbloquear',
+                  motivo: reason,
+                  payload: { duration_minutes: duration },
+                  solicitado_por: auth.user.id,
+                  solicitado_por_nombre: actorName,
+                  expira_en: new Date(Date.now() + 15 * 60_000).toISOString(),
+                }))
+              ).select('id, notebook_id')
+              if (commandError) throw commandError
+              ;(commands || []).forEach((command: { id: string; notebook_id: string }) => commandByNotebook.set(command.notebook_id, command.id))
+            } catch (commandError) {
+              // Mantiene compatibilidad con el desbloqueo antiguo basado en solicitudes_override.
+              lotId = null
+              warnings.push(`Las solicitudes se aprobaron, pero no se pudieron crear comandos del agente: ${errorDetails(commandError)}`)
+            }
+          } else {
+            warnings.push('No se crearon comandos porque ninguna solicitud corresponde a un notebook registrado.')
+          }
+        }
       }
 
-      for (const req of requests) {
+      const resolvedAt = new Date().toISOString()
+      const commonUpdate: Json = {
+        estado: decision,
+        resuelto_por: actorName,
+        resuelto_en: resolvedAt,
+        motivo: reason,
+        duracion_minutos: duration,
+        lote_id: lotId,
+      }
+
+      let updateResult = await admin
+        .from('solicitudes_override')
+        .update(commonUpdate)
+        .in('id', requests.map(item => item.id))
+        .eq('estado', 'pendiente')
+
+      if (updateResult.error && /lote_id|duracion_minutos|motivo/i.test(errorDetails(updateResult.error))) {
+        warnings.push('La tabla solicitudes_override aún no tiene todas las columnas V2; se aplicó el desbloqueo compatible.')
+        updateResult = await admin
+          .from('solicitudes_override')
+          .update({ estado: decision, resuelto_por: actorName, resuelto_en: resolvedAt })
+          .in('id', requests.map(item => item.id))
+          .eq('estado', 'pendiente')
+      }
+      if (updateResult.error) throw updateResult.error
+
+      if (decision === 'aprobado' && requestIds.length === 1) {
         const requestedPerson = body.person && typeof body.person === 'object' ? body.person as Json : {}
-        const update: Json = {
-          estado: decision,
-          resuelto_por: actorName,
-          resuelto_en: new Date().toISOString(),
-          motivo: reason,
-          duracion_minutos: duration,
-          lote_id: lotId,
-          comando_id: commandByNotebook.get(req.notebook_id) || null,
+        const requestRow = requests[0]
+        const personUpdate: Json = {
+          rut_override: String(requestedPerson.rut || requestRow.rut_override || '') || null,
+          nombre_override: String(requestedPerson.nombre || requestRow.nombre_override || '') || null,
+          curso_override: String(requestedPerson.detalle || requestRow.curso_override || '') || null,
         }
-        if (decision === 'aprobado' && requestIds.length === 1) {
-          update.rut_override = String(requestedPerson.rut || req.rut_override || '') || null
-          update.nombre_override = String(requestedPerson.nombre || req.nombre_override || '') || null
-          update.curso_override = String(requestedPerson.detalle || req.curso_override || '') || null
-        }
-        const { error } = await admin.from('solicitudes_override').update(update).eq('id', req.id)
-        if (error) throw error
+        const { error: personError } = await admin.from('solicitudes_override').update(personUpdate).eq('id', requestRow.id)
+        if (personError) warnings.push(`No se actualizó la persona autorizada: ${errorDetails(personError)}`)
       }
 
-      await admin.from('eventos_sistema').insert(requests.map(req => ({
+      for (const [notebookId, commandId] of commandByNotebook.entries()) {
+        const { error: commandLinkError } = await admin
+          .from('solicitudes_override')
+          .update({ comando_id: commandId })
+          .in('id', requests.filter(item => item.notebook_id === notebookId).map(item => item.id))
+        if (commandLinkError) warnings.push(`No se vinculó el comando de ${notebookId}: ${errorDetails(commandLinkError)}`)
+      }
+
+      const { error: eventError } = await admin.from('eventos_sistema').insert(requests.map(item => ({
         categoria: 'desbloqueo',
         tipo_evento: decision === 'aprobado' ? 'desbloqueo_aprobado' : 'desbloqueo_rechazado',
         severidad: 'media',
@@ -142,12 +243,13 @@ export async function POST(request: NextRequest) {
         descripcion: `${actorName}: ${reason}`,
         actor_user_id: auth.user.id,
         actor_nombre: actorName,
-        notebook_id: req.notebook_id,
+        notebook_id: item.notebook_id,
         origen: 'api_admin',
-        datos: { solicitud_id: req.id, duracion_minutos: duration, lote_id: lotId },
+        datos: { solicitud_id: item.id, duracion_minutos: duration, lote_id: lotId },
       })))
+      if (eventError) warnings.push(`No se registraron todos los eventos de auditoría: ${errorDetails(eventError)}`)
 
-      return NextResponse.json({ ok: true, updated: requests.length, lote_id: lotId })
+      return NextResponse.json({ ok: true, updated: requests.length, lote_id: lotId, warnings })
     }
 
     if (action === 'incident') {
@@ -251,7 +353,8 @@ export async function POST(request: NextRequest) {
 
     return errorResponse('Acción no reconocida', 404)
   } catch (error) {
-    console.error('Admin action error', error)
-    return errorResponse('No fue posible completar la acción', 500, error instanceof Error ? error.message : error)
+    const details = errorDetails(error)
+    console.error('Admin action error', { action, details, error })
+    return errorResponse('No fue posible completar la acción', 500, details)
   }
 }

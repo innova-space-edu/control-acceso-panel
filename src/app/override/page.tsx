@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { adminAction } from '@/lib/admin-api'
 import { formatDateTime } from '@/lib/format'
+import { createRealtimeRefresh } from '@/lib/realtime-refresh'
 import { supabase, type SolicitudOverride } from '@/lib/supabase'
 
 type DecisionModal = {
@@ -26,13 +27,19 @@ export default function OverridePage() {
   const [searching, setSearching] = useState(false)
 
   useEffect(() => {
-    load()
+    const sync = createRealtimeRefresh(load, 350)
+    void sync.execute()
     const channel = supabase
       .channel('override_control_masivo')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'comandos_remotos' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comandos_remotos' }, sync.schedule)
       .subscribe()
-    return () => { supabase.removeChannel(channel) }
+    const interval = setInterval(sync.schedule, 30_000)
+    return () => {
+      clearInterval(interval)
+      sync.cancel()
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function load() {
@@ -88,7 +95,7 @@ export default function OverridePage() {
     setSaving(true)
     setError('')
     try {
-      await adminAction({
+      const result = await adminAction<{ updated: number; warnings?: string[] }>({
         action: 'bulk_override',
         request_ids: modal.ids,
         decision: modal.decision,
@@ -96,11 +103,12 @@ export default function OverridePage() {
         duration_minutes: duration,
         person: modal.ids.length === 1 ? person : undefined,
       })
-      setSuccess(`${modal.ids.length} solicitud${modal.ids.length === 1 ? '' : 'es'} ${modal.decision === 'aprobado' ? 'aprobada(s)' : 'rechazada(s)'}.`)
+      setSuccess(`${result.updated || modal.ids.length} solicitud${modal.ids.length === 1 ? '' : 'es'} ${modal.decision === 'aprobado' ? 'aprobada(s)' : 'rechazada(s)'}.`)
       setTimeout(() => setSuccess(''), 4000)
       setSelected(new Set())
       setModal(null)
       await load()
+      if (result.warnings?.length) setError(`Advertencia: ${result.warnings.join(' ')}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'No fue posible procesar las solicitudes')
     } finally {

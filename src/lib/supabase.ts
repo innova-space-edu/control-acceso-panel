@@ -1,14 +1,27 @@
-import { createClient } from '@supabase/supabase-js'
 import { createBrowserClient } from '@supabase/ssr'
+import type { SupabaseClient } from '@supabase/supabase-js'
 
 const url = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
 const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ''
 
-export const supabase = createClient(url, key)
+let browserClient: SupabaseClient | undefined
 
 export function createSupabaseBrowser() {
-  return createBrowserClient(url, key)
+  if (!url || !key) throw new Error('Faltan NEXT_PUBLIC_SUPABASE_URL o NEXT_PUBLIC_SUPABASE_ANON_KEY')
+  if (typeof window === 'undefined') throw new Error('El cliente de Supabase del navegador no puede crearse en el servidor')
+  if (!browserClient) browserClient = createBrowserClient(url, key)
+  return browserClient
 }
+
+// Proxy diferido: evita inicializar createBrowserClient durante el render del servidor
+// y mantiene un único cliente, una única sesión y una sola conexión Realtime en el navegador.
+export const supabase = new Proxy({} as SupabaseClient, {
+  get(_target, property) {
+    const client = createSupabaseBrowser()
+    const value = (client as unknown as Record<PropertyKey, unknown>)[property]
+    return typeof value === 'function' ? value.bind(client) : value
+  },
+})
 
 export type Rol = 'estudiante' | 'docente'
 export type Severidad = 'informativa' | 'baja' | 'media' | 'alta' | 'critica'
