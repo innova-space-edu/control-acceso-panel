@@ -2,8 +2,9 @@
 
 import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
-import { supabase, type EventoSistema } from '@/lib/supabase'
 import { formatDateTime, isOnline } from '@/lib/format'
+import { createRealtimeRefresh } from '@/lib/realtime-refresh'
+import { supabase, type EventoSistema } from '@/lib/supabase'
 
 type Stats = {
   accesosHoy: number
@@ -38,27 +39,30 @@ export default function Dashboard() {
   const [events, setEvents] = useState<EventoSistema[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [now, setNow] = useState(new Date())
+  const [now, setNow] = useState<Date | null>(null)
 
   useEffect(() => {
+    setNow(new Date())
     const clock = setInterval(() => setNow(new Date()), 1000)
     return () => clearInterval(clock)
   }, [])
 
   useEffect(() => {
-    load()
+    const sync = createRealtimeRefresh(load, 400)
+    void sync.execute()
     const channel = supabase
       .channel('dashboard_control_central')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'eventos_sistema' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'dispositivos_estado' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'comandos_remotos' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones_activas' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'eventos_sistema' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dispositivos_estado' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comandos_remotos' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sesiones_activas' }, sync.schedule)
       .subscribe()
-    const refresh = setInterval(load, 30_000)
+    const refresh = setInterval(sync.schedule, 30_000)
     return () => {
       clearInterval(refresh)
+      sync.cancel()
       supabase.removeChannel(channel)
     }
   }, [])
@@ -121,9 +125,9 @@ export default function Dashboard() {
     setLoading(false)
   }
 
-  const dateLabel = useMemo(() => now.toLocaleDateString('es-CL', {
+  const dateLabel = useMemo(() => now ? now.toLocaleDateString('es-CL', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  }), [now])
+  }) : 'Cargando fecha...', [now])
 
   return (
     <div className="max-w-7xl mx-auto">
@@ -136,7 +140,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-3 rounded-xl border border-[#1a2a40] bg-[#0d1520] px-4 py-2.5">
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-slate-500 text-xs">Tiempo real</span>
-          <span className="font-mono text-sm text-slate-300">{now.toLocaleTimeString('es-CL')}</span>
+          <span className="font-mono text-sm text-slate-300">{now ? now.toLocaleTimeString('es-CL') : '--:--:--'}</span>
         </div>
       </header>
 
