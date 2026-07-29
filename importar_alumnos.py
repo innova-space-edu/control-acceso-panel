@@ -6,8 +6,11 @@ Soporta .xlsx, .xls, y .xls HTML desde SIGE (con filas extras al inicio).
 import os, glob
 from pathlib import Path
 
-SUPABASE_URL  = "https://iiuglkpkkfrjazewuknt.supabase.co"
-SUPABASE_KEY  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImlpdWdsa3Bra2ZyamF6ZXd1a250Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0NTU5MTUsImV4cCI6MjA4OTAzMTkxNX0.-WHsrggjEgcERSxhjG1qvIqLB5ixWVYs40ltAn1ruT4"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Define SUPABASE_URL y SUPABASE_ANON_KEY antes de ejecutar el importador")
 CARPETA_EXCEL = r"C:\alumnos"
 
 CURSOS = {

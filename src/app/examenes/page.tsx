@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { adminAction } from '@/lib/admin-api'
 
 // ── Tipos ──────────────────────────────────────────────────────────────────────
 interface ExamenKiosk {
@@ -122,16 +123,34 @@ export default function ExamenesPage() {
     }
 
     setSaving(true)
-    const { error: e } = await supabase.from('examenes_kiosk').insert({
+    const examTitle = fTitle.trim() || `Examen ${code}`
+    const examDuration = parseInt(fDur) || 60
+    const { data: createdExam, error: e } = await supabase.from('examenes_kiosk').insert({
       exam_code:   code,
       exam_url:    fUrl.trim(),
-      exam_title:  fTitle.trim() || `Examen ${code}`,
+      exam_title:  examTitle,
       sala:        fSala,
-      creado_por:  fAdmin.trim() || 'Admin',
-      duracion_min: parseInt(fDur) || 60,
+      creado_por:  fAdmin.trim() || 'Administrador',
+      duracion_min: examDuration,
       estado:      'activo',
       cerrar_ahora: false,
-    })
+    }).select('id').single()
+
+    if (!e) {
+      const { data: notebooks } = await supabase.from('notebooks').select('id').eq('sala', fSala)
+      if (notebooks?.length) {
+        try {
+          await adminAction({
+            action: 'command', notebook_ids: notebooks.map(n => n.id), type: 'iniciar_examen',
+            reason: `Inicio del examen ${examTitle} en ${fSala}`,
+            payload: { exam_id: createdExam?.id, exam_code: code, exam_url: fUrl.trim(), exam_title: examTitle, duration_minutes: examDuration },
+            expiry_minutes: 15,
+          })
+        } catch {
+          // La tabla examenes_kiosk mantiene compatibilidad con kiosks sin agente.
+        }
+      }
+    }
 
     setSaving(false)
     if (e) {
@@ -148,11 +167,24 @@ export default function ExamenesPage() {
   // ── Cerrar examen ───────────────────────────────────────────────────────────
   async function cerrarExamen(id: string) {
     setCerrando(id)
+    const exam = examenes.find(item => item.id === id)
     const { error: e } = await supabase
       .from('examenes_kiosk')
       .update({ estado: 'cerrado', cerrar_ahora: true, closed_at: new Date().toISOString() })
       .eq('id', id)
-    
+
+    if (!e && exam) {
+      const { data: notebooks } = await supabase.from('notebooks').select('id').eq('sala', exam.sala)
+      if (notebooks?.length) {
+        try {
+          await adminAction({ action: 'command', notebook_ids: notebooks.map(n => n.id), type: 'cerrar_examen',
+            reason: `Cierre del examen ${exam.exam_title} en ${exam.sala}`, payload: { exam_id: id }, expiry_minutes: 15 })
+        } catch {
+          // El cierre por examenes_kiosk sigue funcionando aunque un agente no responda.
+        }
+      }
+    }
+
     setCerrando(null)
     if (e) {
       setError('Error al cerrar: ' + e.message)

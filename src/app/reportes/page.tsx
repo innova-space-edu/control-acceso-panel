@@ -1,458 +1,322 @@
 'use client'
-import { useState, useEffect, useRef } from 'react'
+
+import { useEffect, useMemo, useState } from 'react'
+import { registrarEvento } from '@/lib/events'
+import { formatDateTime, isOnline } from '@/lib/format'
 import { supabase } from '@/lib/supabase'
 
-// ── TIPOS ──────────────────────────────────────────────────────────────────────
-interface DonutData {
-  label: string
-  value: number
-  color: string
-}
+type ReportDef = { id: string; title: string; description: string; group: string; tone: string }
+type ReportRow = Record<string, string | number | boolean | null | undefined>
 
-interface EstadisticasData {
-  resultados: DonutData[]
-  cursos: DonutData[]
-  notebooks: DonutData[]
-  porHora: DonutData[]
-}
+const REPORTS: ReportDef[] = [
+  { id: 'eventos', title: 'Auditoría completa', description: 'Todo lo registrado y realizado en la plataforma.', group: 'Auditoría', tone: 'blue' },
+  { id: 'administracion', title: 'Acciones administrativas', description: 'Creaciones, cambios, eliminaciones, reportes y responsables.', group: 'Auditoría', tone: 'purple' },
+  { id: 'accesos', title: 'Ingresos y sesiones', description: 'Fecha, hora, duración, usuario, equipo y resultado.', group: 'Operación', tone: 'green' },
+  { id: 'fallidos', title: 'Accesos fallidos', description: 'Intentos rechazados y causas registradas.', group: 'Operación', tone: 'red' },
+  { id: 'uso_curso', title: 'Uso por curso', description: 'Cantidad de accesos y tiempo acumulado por curso.', group: 'Operación', tone: 'cyan' },
+  { id: 'uso_sala', title: 'Uso por sala', description: 'Actividad y tiempo de uso de cada sala.', group: 'Operación', tone: 'cyan' },
+  { id: 'uso_notebook', title: 'Uso por notebook', description: 'Sesiones, usuarios y duración por equipo.', group: 'Operación', tone: 'cyan' },
+  { id: 'incidencias', title: 'Incidencias de seguridad', description: 'Severidad, estado, responsable y resolución.', group: 'Seguridad', tone: 'amber' },
+  { id: 'desbloqueos', title: 'Desbloqueos', description: 'Solicitudes aprobadas, rechazadas, duración y administrador.', group: 'Seguridad', tone: 'purple' },
+  { id: 'comandos', title: 'Comandos remotos', description: 'Envío, recepción, ejecución, fallas y tiempos.', group: 'Seguridad', tone: 'blue' },
+  { id: 'dispositivos', title: 'Inventario y estado', description: 'IP, agente, última señal, seguridad y datos técnicos.', group: 'Inventario', tone: 'green' },
+  { id: 'examenes', title: 'Exámenes en sala', description: 'Inicio, cierre, sala, duración y responsable.', group: 'Evaluaciones', tone: 'blue' },
+]
 
-// ── PALETAS DE COLORES ─────────────────────────────────────────────────────────
-const COLORES_RESULTADO = ['#22d3ee', '#f43f5e', '#a855f7']
-const COLORES_CURSOS    = ['#06b6d4','#8b5cf6','#10b981','#f59e0b','#ef4444','#3b82f6','#ec4899','#14b8a6','#f97316','#84cc16']
-const COLORES_NOTEBOOKS = ['#38bdf8','#fb7185','#a78bfa','#34d399','#fbbf24','#60a5fa','#f472b6','#4ade80','#fb923c','#c084fc']
-const COLORES_HORA      = ['#0ea5e9','#6366f1','#8b5cf6','#a855f7','#d946ef','#ec4899','#f43f5e','#fb923c','#f59e0b','#84cc16','#22c55e','#10b981']
-
-// ── COMPONENTE DONUT ───────────────────────────────────────────────────────────
-function DonutChart({ data, titulo, total }: {
-  data: DonutData[]
-  titulo: string
-  total: number
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [hovered, setHovered] = useState<number | null>(null)
+export default function ReportsPage() {
+  const today = new Date().toISOString().split('T')[0]
+  const [params, setParams] = useState({ from: today, to: today, course: '', notebook: '', room: '', severity: '' })
+  const [stats, setStats] = useState({ events: 0, incidents: 0, failures: 0, online: 0, offline: 0, commandsFailed: 0 })
+  const [breakdown, setBreakdown] = useState<{ label: string; value: number }[]>([])
+  const [generating, setGenerating] = useState<string | null>(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || data.length === 0) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-
-    const w = canvas.width
-    const h = canvas.height
-    const cx = w / 2
-    const cy = h / 2
-    const r  = Math.min(cx, cy) - 10
-    const ri = r * 0.58  // radio interior
-
-    ctx.clearRect(0, 0, w, h)
-
-    let startAngle = -Math.PI / 2
-    const totalVal = data.reduce((s, d) => s + d.value, 0)
-    if (totalVal === 0) return
-
-    data.forEach((seg, i) => {
-      const slice = (seg.value / totalVal) * 2 * Math.PI
-      const endAngle = startAngle + slice
-      const isHov = hovered === i
-      const offset = isHov ? 6 : 0
-
-      const midAngle = startAngle + slice / 2
-      const ox = Math.cos(midAngle) * offset
-      const oy = Math.sin(midAngle) * offset
-
-      // Sombra
-      ctx.shadowColor = seg.color + '66'
-      ctx.shadowBlur  = isHov ? 18 : 8
-
-      ctx.beginPath()
-      ctx.moveTo(cx + ox, cy + oy)
-      ctx.arc(cx + ox, cy + oy, r, startAngle, endAngle)
-      ctx.arc(cx + ox, cy + oy, ri, endAngle, startAngle, true)
-      ctx.closePath()
-
-      // Gradiente radial
-      const grad = ctx.createRadialGradient(cx + ox, cy + oy, ri, cx + ox, cy + oy, r)
-      grad.addColorStop(0, seg.color + 'cc')
-      grad.addColorStop(1, seg.color)
-      ctx.fillStyle = grad
-      ctx.fill()
-
-      // Borde
-      ctx.strokeStyle = '#060a10'
-      ctx.lineWidth = 2
-      ctx.stroke()
-
-      ctx.shadowBlur = 0
-      startAngle = endAngle
-    })
-
-    // Texto central
-    ctx.fillStyle = '#f1f5f9'
-    ctx.font = `bold ${Math.floor(r * 0.28)}px Segoe UI`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(total.toString(), cx, cy - 8)
-    ctx.fillStyle = '#475569'
-    ctx.font = `${Math.floor(r * 0.14)}px Segoe UI`
-    ctx.fillText('total', cx, cy + 14)
-
-  }, [data, hovered, total])
-
-  // Detectar hover
-  function handleMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const rect = canvas.getBoundingClientRect()
-    const mx = e.clientX - rect.left - canvas.width / 2
-    const my = e.clientY - rect.top  - canvas.height / 2
-    const dist = Math.sqrt(mx * mx + my * my)
-    const r  = Math.min(canvas.width, canvas.height) / 2 - 10
-    const ri = r * 0.58
-
-    if (dist < ri || dist > r) { setHovered(null); return }
-
-    let angle = Math.atan2(my, mx) + Math.PI / 2
-    if (angle < 0) angle += 2 * Math.PI
-    const totalVal = data.reduce((s, d) => s + d.value, 0)
-    let start = 0
-    for (let i = 0; i < data.length; i++) {
-      const slice = (data[i].value / totalVal) * 2 * Math.PI
-      if (angle >= start && angle < start + slice) { setHovered(i); return }
-      start += slice
-    }
-    setHovered(null)
-  }
-
-  const totalVal = data.reduce((s, d) => s + d.value, 0)
-
-  return (
-    <div className="bg-[#0d1520] border border-[#1a2a40] rounded-2xl p-5">
-      <div className="flex items-center gap-2 mb-4">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-        <h3 className="text-slate-300 text-sm font-semibold">{titulo}</h3>
-      </div>
-
-      {data.length === 0 ? (
-        <div className="text-center text-slate-600 text-xs py-8">Sin datos</div>
-      ) : (
-        <div className="flex gap-4 items-start">
-          {/* Canvas donut */}
-          <div className="flex-shrink-0">
-            <canvas
-              ref={canvasRef}
-              width={160} height={160}
-              onMouseMove={handleMouseMove}
-              onMouseLeave={() => setHovered(null)}
-              className="cursor-pointer"
-            />
-          </div>
-
-          {/* Leyenda */}
-          <div className="flex-1 space-y-1.5 min-w-0">
-            {data.map((d, i) => {
-              const pct = totalVal > 0 ? ((d.value / totalVal) * 100).toFixed(1) : '0'
-              return (
-                <div
-                  key={i}
-                  onMouseEnter={() => setHovered(i)}
-                  onMouseLeave={() => setHovered(null)}
-                  className={`flex items-center gap-2 rounded-lg px-2 py-1 cursor-pointer transition-all ${
-                    hovered === i ? 'bg-white/5' : ''
-                  }`}
-                >
-                  <span
-                    className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: d.color, boxShadow: `0 0 6px ${d.color}88` }}
-                  />
-                  <span className="text-slate-400 text-xs truncate flex-1" title={d.label}>
-                    {d.label}
-                  </span>
-                  <span className="text-xs font-mono flex-shrink-0" style={{ color: d.color }}>
-                    {pct}%
-                  </span>
-                  <span className="text-slate-600 text-xs flex-shrink-0">
-                    ({d.value})
-                  </span>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ── PÁGINA PRINCIPAL ───────────────────────────────────────────────────────────
-export default function ReportesPage() {
-  const [generando, setGenerando] = useState<string | null>(null)
-  const [stats, setStats]         = useState<EstadisticasData | null>(null)
-  const [loadingStats, setLoadingStats] = useState(true)
-
-  const hoy = new Date().toISOString().split('T')[0]
-  const [params, setParams] = useState({
-    desde: hoy, hasta: hoy,
-    curso: '', notebook: '', sala: '',
-  })
-
-  // Cargar estadísticas al iniciar y en tiempo real
-  useEffect(() => {
-    cargarEstadisticas()
-
-    const canal = supabase
-      .channel('reportes_realtime')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'accesos' }, cargarEstadisticas)
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'accesos' }, cargarEstadisticas)
+    loadStats()
+    const channel = supabase
+      .channel('reportes_integrales')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'eventos_sistema' }, loadStats)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, loadStats)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'dispositivos_estado' }, loadStats)
       .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [params.from, params.to, params.course, params.notebook, params.room, params.severity])
 
-    return () => { supabase.removeChannel(canal) }
-  }, [params.desde, params.hasta])
+  async function loadStats() {
+    const from = `${params.from}T00:00:00`
+    const to = `${params.to}T23:59:59.999`
+    let eventsQuery = supabase.from('eventos_sistema').select('categoria,severidad,notebook_id,sala,curso,fecha_hora')
+      .gte('fecha_hora', from).lte('fecha_hora', to)
+    if (params.notebook) eventsQuery = eventsQuery.ilike('notebook_id', `%${params.notebook}%`)
+    if (params.room) eventsQuery = eventsQuery.ilike('sala', `%${params.room}%`)
+    if (params.course) eventsQuery = eventsQuery.ilike('curso', `%${params.course}%`)
+    if (params.severity) eventsQuery = eventsQuery.eq('severidad', params.severity)
 
-  async function cargarEstadisticas() {
-    setLoadingStats(true)
-    const desde = params.desde + 'T00:00:00'
-    const hasta = params.hasta + 'T23:59:59'
+    const [eventsResult, incidentsResult, failuresResult, deviceResult, commandResult] = await Promise.all([
+      eventsQuery,
+      supabase.from('incidencias').select('*', { count: 'exact', head: true }).gte('creada_en', from).lte('creada_en', to),
+      supabase.from('accesos').select('*', { count: 'exact', head: true }).gte('timestamp_inicio', from).lte('timestamp_inicio', to).eq('resultado', 'fallido'),
+      supabase.from('dispositivos_estado').select('online,ultima_senal'),
+      supabase.from('comandos_remotos').select('*', { count: 'exact', head: true }).gte('creado_en', from).lte('creado_en', to).eq('estado', 'fallido'),
+    ])
 
-    const { data: rows } = await supabase
-      .from('accesos')
-      .select('resultado, curso, notebook_id, timestamp_inicio')
-      .gte('timestamp_inicio', desde)
-      .lte('timestamp_inicio', hasta)
-
-    if (!rows) { setLoadingStats(false); return }
-
-    // Por resultado
-    const porResultado: Record<string, number> = {}
-    rows.forEach(r => { porResultado[r.resultado] = (porResultado[r.resultado] || 0) + 1 })
-    const resultadoLabels: Record<string, string> = {
-      exitoso: '✓ Exitoso', fallido: '✗ Fallido', override: '⊕ Override'
+    if (eventsResult.error) {
+      setError('Ejecuta la migración del centro de control: ' + eventsResult.error.message)
+      return
     }
-    const resultados: DonutData[] = Object.entries(porResultado).map(([k, v], i) => ({
-      label: resultadoLabels[k] || k, value: v, color: COLORES_RESULTADO[i % COLORES_RESULTADO.length]
-    }))
-
-    // Por curso (top 8)
-    const porCurso: Record<string, number> = {}
-    rows.filter(r => r.resultado === 'exitoso').forEach(r => {
-      const c = r.curso || 'Sin curso'
-      porCurso[c] = (porCurso[c] || 0) + 1
+    setError('')
+    const events = eventsResult.data || []
+    const categories = new Map<string, number>()
+    events.forEach(e => categories.set(e.categoria, (categories.get(e.categoria) || 0) + 1))
+    setBreakdown([...categories.entries()].sort((a, b) => b[1] - a[1]).map(([label, value]) => ({ label, value })))
+    const devices = deviceResult.data || []
+    const online = devices.filter(d => isOnline(d.ultima_senal, d.online)).length
+    setStats({
+      events: events.length,
+      incidents: incidentsResult.count || 0,
+      failures: failuresResult.count || 0,
+      online,
+      offline: devices.length - online,
+      commandsFailed: commandResult.count || 0,
     })
-    const cursos: DonutData[] = Object.entries(porCurso)
-      .sort((a, b) => b[1] - a[1]).slice(0, 8)
-      .map(([k, v], i) => ({ label: k, value: v, color: COLORES_CURSOS[i % COLORES_CURSOS.length] }))
+  }
 
-    // Por notebook (top 8)
-    const porNotebook: Record<string, number> = {}
-    rows.forEach(r => {
-      const n = r.notebook_id || 'Desconocido'
-      porNotebook[n] = (porNotebook[n] || 0) + 1
-    })
-    const notebooks: DonutData[] = Object.entries(porNotebook)
-      .sort((a, b) => b[1] - a[1]).slice(0, 8)
-      .map(([k, v], i) => ({ label: k, value: v, color: COLORES_NOTEBOOKS[i % COLORES_NOTEBOOKS.length] }))
+  async function getReportData(id: string): Promise<ReportRow[]> {
+    const from = `${params.from}T00:00:00`
+    const to = `${params.to}T23:59:59.999`
 
-    // Por hora del día
-    const porHora: Record<number, number> = {}
-    rows.forEach(r => {
-      const h = new Date(r.timestamp_inicio).getHours()
-      porHora[h] = (porHora[h] || 0) + 1
-    })
-    const porHoraData: DonutData[] = Object.entries(porHora)
-      .sort((a, b) => Number(a[0]) - Number(b[0]))
-      .map(([h, v], i) => ({
-        label: `${String(h).padStart(2, '0')}:00 hrs`,
-        value: v,
-        color: COLORES_HORA[Number(h) % COLORES_HORA.length]
+    if (id === 'eventos' || id === 'administracion') {
+      let query = supabase.from('eventos_sistema').select('*').gte('fecha_hora', from).lte('fecha_hora', to).order('fecha_hora', { ascending: false })
+      if (id === 'administracion') query = query.in('categoria', ['administracion', 'reporte'])
+      if (params.notebook) query = query.ilike('notebook_id', `%${params.notebook}%`)
+      if (params.room) query = query.ilike('sala', `%${params.room}%`)
+      if (params.course) query = query.ilike('curso', `%${params.course}%`)
+      if (params.severity) query = query.eq('severidad', params.severity)
+      const { data, error } = await query
+      if (error) throw error
+      return (data || []).map(e => ({
+        'Fecha y hora': formatDateTime(e.fecha_hora), Categoría: e.categoria, Evento: e.tipo_evento,
+        Severidad: e.severidad, Resultado: e.resultado, Descripción: e.descripcion,
+        Administrador: e.actor_nombre, RUT: e.rut_usuario, Usuario: e.nombre_usuario,
+        Notebook: e.notebook_id, Sala: e.sala, Curso: e.curso, 'IP local': e.ip_local,
+        'IP pública': e.ip_public, Origen: e.origen, Datos: JSON.stringify(e.datos || {}),
       }))
-
-    setStats({ resultados, cursos, notebooks, porHora: porHoraData })
-    setLoadingStats(false)
-  }
-
-  async function exportar(tipo: string) {
-    setGenerando(tipo)
-    try {
-      const XLSX = await import('xlsx')
-      let data: any[] = []
-
-      if (tipo === 'accesos' || tipo === 'fallidos') {
-        let q = supabase.from('accesos').select('*')
-          .gte('timestamp_inicio', params.desde + 'T00:00:00')
-          .lte('timestamp_inicio', params.hasta + 'T23:59:59')
-          .order('timestamp_inicio', { ascending: false })
-        if (tipo === 'fallidos') q = q.eq('resultado', 'fallido')
-        if (params.notebook) q = q.eq('notebook_id', params.notebook)
-        if (params.sala)     q = q.eq('sala', params.sala)
-        if (params.curso)    q = q.eq('curso', params.curso)
-        const { data: rows } = await q
-        data = (rows || []).map(r => ({
-          'Fecha':       new Date(r.timestamp_inicio).toLocaleDateString('es-CL'),
-          'Hora inicio': new Date(r.timestamp_inicio).toLocaleTimeString('es-CL'),
-          'Hora fin':    r.timestamp_fin ? new Date(r.timestamp_fin).toLocaleTimeString('es-CL') : '',
-          'Duración (min)': r.duracion_minutos || '',
-          'RUT':         r.rut || '',
-          'Nombre':      r.nombre || '',
-          'Curso':       r.curso || '',
-          'Notebook':    r.notebook_id || '',
-          'Sala':        r.sala || '',
-          'Resultado':   r.resultado,
-          'Tipo evento': r.tipo_evento,
-        }))
-      }
-
-      if (tipo === 'alertas') {
-        const { data: rows } = await supabase.from('alertas').select('*')
-          .gte('timestamp', params.desde + 'T00:00:00')
-          .lte('timestamp', params.hasta + 'T23:59:59')
-          .order('timestamp', { ascending: false })
-        data = (rows || []).map(r => ({
-          'Fecha':       new Date(r.timestamp).toLocaleDateString('es-CL'),
-          'Hora':        new Date(r.timestamp).toLocaleTimeString('es-CL'),
-          'Tipo':        r.tipo,
-          'Notebook':    r.notebook_id || '',
-          'RUT':         r.rut || '',
-          'Descripción': r.descripcion || '',
-          'Resuelta':    r.resuelta ? 'Sí' : 'No',
-        }))
-      }
-
-      if (tipo === 'uso_por_curso') {
-        const { data: rows } = await supabase.from('accesos').select('curso, resultado, duracion_minutos')
-          .gte('timestamp_inicio', params.desde + 'T00:00:00')
-          .lte('timestamp_inicio', params.hasta + 'T23:59:59')
-          .eq('resultado', 'exitoso')
-        const conteo: Record<string, { total: number; minutos: number }> = {}
-        for (const r of rows || []) {
-          const c = r.curso || 'Sin curso'
-          if (!conteo[c]) conteo[c] = { total: 0, minutos: 0 }
-          conteo[c].total++
-          conteo[c].minutos += r.duracion_minutos || 0
-        }
-        data = Object.entries(conteo).sort((a, b) => b[1].total - a[1].total)
-          .map(([curso, d]) => ({
-            'Curso': curso,
-            'Total accesos': d.total,
-            'Minutos totales': Math.round(d.minutos),
-          }))
-      }
-
-      if (data.length === 0) { alert('No hay datos para exportar.'); setGenerando(null); return }
-
-      const ws = XLSX.utils.json_to_sheet(data)
-      const wb = XLSX.utils.book_new()
-      XLSX.utils.book_append_sheet(wb, ws, tipo)
-      XLSX.writeFile(wb, `control_acceso_${tipo}_${params.desde}_${params.hasta}.xlsx`)
-    } catch (e) {
-      alert('Error al generar el reporte')
     }
-    setGenerando(null)
+
+    if (['accesos', 'fallidos', 'uso_curso', 'uso_sala', 'uso_notebook'].includes(id)) {
+      let query = supabase.from('accesos').select('*').gte('timestamp_inicio', from).lte('timestamp_inicio', to).order('timestamp_inicio', { ascending: false })
+      if (id === 'fallidos') query = query.eq('resultado', 'fallido')
+      if (params.notebook) query = query.ilike('notebook_id', `%${params.notebook}%`)
+      if (params.room) query = query.ilike('sala', `%${params.room}%`)
+      if (params.course) query = query.ilike('curso', `%${params.course}%`)
+      const { data, error } = await query
+      if (error) throw error
+      const rows = data || []
+      if (id.startsWith('uso_')) {
+        const key = id === 'uso_curso' ? 'curso' : id === 'uso_sala' ? 'sala' : 'notebook_id'
+        const summary = new Map<string, { sessions: number; minutes: number; failures: number }>()
+        rows.forEach(r => {
+          const label = r[key] || 'Sin información'
+          const current = summary.get(label) || { sessions: 0, minutes: 0, failures: 0 }
+          current.sessions++
+          current.minutes += Number(r.duracion_minutos || 0)
+          if (r.resultado === 'fallido') current.failures++
+          summary.set(label, current)
+        })
+        return [...summary.entries()].sort((a, b) => b[1].sessions - a[1].sessions).map(([label, value]) => ({
+          [id === 'uso_curso' ? 'Curso' : id === 'uso_sala' ? 'Sala' : 'Notebook']: label,
+          'Total registros': value.sessions, 'Minutos de uso': Math.round(value.minutes), 'Accesos fallidos': value.failures,
+        }))
+      }
+      return rows.map(r => ({
+        'Fecha inicio': formatDateTime(r.timestamp_inicio), 'Fecha fin': formatDateTime(r.timestamp_fin),
+        'Duración (min)': r.duracion_minutos, Resultado: r.resultado, Evento: r.tipo_evento,
+        RUT: r.rut, Nombre: r.nombre, Curso: r.curso, Notebook: r.notebook_id, Sala: r.sala,
+      }))
+    }
+
+    if (id === 'incidencias') {
+      let query = supabase.from('incidencias').select('*').gte('creada_en', from).lte('creada_en', to).order('creada_en', { ascending: false })
+      if (params.notebook) query = query.ilike('notebook_id', `%${params.notebook}%`)
+      if (params.room) query = query.ilike('sala', `%${params.room}%`)
+      if (params.severity) query = query.eq('severidad', params.severity)
+      const { data, error } = await query
+      if (error) throw error
+      return (data || []).map(i => ({
+        Creada: formatDateTime(i.creada_en), Actualizada: formatDateTime(i.actualizada_en), Resuelta: formatDateTime(i.resuelta_en),
+        Título: i.titulo, Tipo: i.tipo, Severidad: i.severidad, Estado: i.estado, Descripción: i.descripcion,
+        Notebook: i.notebook_id, RUT: i.rut, Sala: i.sala, Responsable: i.asignada_nombre,
+        'Resuelta por': i.resuelta_por_nombre, Resolución: i.resolucion,
+      }))
+    }
+
+    if (id === 'desbloqueos') {
+      const { data, error } = await supabase.from('solicitudes_override').select('*').gte('creado_en', from).lte('creado_en', to).order('creado_en', { ascending: false })
+      if (error) throw error
+      return (data || []).map(r => ({
+        Solicitado: formatDateTime(r.creado_en), Resuelto: formatDateTime(r.resuelto_en), Estado: r.estado,
+        Notebook: r.notebook_id, RUT: r.rut_override, Nombre: r.nombre_override, Curso: r.curso_override,
+        Motivo: r.motivo, 'Duración (min)': r.duracion_minutos, 'Resuelto por': r.resuelto_por,
+      }))
+    }
+
+    if (id === 'comandos') {
+      let query = supabase.from('comandos_remotos').select('*').gte('creado_en', from).lte('creado_en', to).order('creado_en', { ascending: false })
+      if (params.notebook) query = query.ilike('notebook_id', `%${params.notebook}%`)
+      const { data, error } = await query
+      if (error) throw error
+      return (data || []).map(c => ({
+        Creado: formatDateTime(c.creado_en), Enviado: formatDateTime(c.enviado_en), Recibido: formatDateTime(c.recibido_en),
+        Ejecutado: formatDateTime(c.ejecutado_en), Notebook: c.notebook_id, Tipo: c.tipo, Estado: c.estado,
+        Motivo: c.motivo, Solicitante: c.solicitado_por_nombre, Detalle: c.resultado_detalle, Intentos: c.intentos,
+      }))
+    }
+
+    if (id === 'dispositivos') {
+      const [{ data: notebooks, error: nError }, { data: states, error: sError }] = await Promise.all([
+        supabase.from('notebooks').select('*').order('id'),
+        supabase.from('dispositivos_estado').select('*'),
+      ])
+      if (nError || sError) throw nError || sError
+      const stateMap = new Map((states || []).map(s => [s.notebook_id, s]))
+      return (notebooks || []).filter(n => !params.notebook || n.id.toLowerCase().includes(params.notebook.toLowerCase())).map(n => {
+        const s: any = stateMap.get(n.id)
+        return {
+          Notebook: n.id, Nombre: n.nombre, Sala: n.sala, Estado: n.estado, Seguridad: n.estado_seguridad,
+          Online: isOnline(s?.ultima_senal, s?.online) ? 'Sí' : 'No', 'Última señal': formatDateTime(s?.ultima_senal),
+          'IP local': s?.ip_local, 'IP pública': s?.ip_public, Hostname: s?.hostname || n.hostname,
+          Red: s?.red, 'Sistema operativo': s?.sistema_operativo || n.sistema_operativo,
+          'Versión agente': s?.version_agente || n.version_agente, Batería: s?.bateria,
+          Serie: n.numero_serie, Marca: n.marca, Modelo: n.modelo, Responsable: n.responsable,
+        }
+      })
+    }
+
+    if (id === 'examenes') {
+      const { data, error } = await supabase.from('examenes_kiosk').select('*').gte('created_at', from).lte('created_at', to).order('created_at', { ascending: false })
+      if (error) throw error
+      return (data || []).map(e => ({
+        Inicio: formatDateTime(e.created_at), Cierre: formatDateTime(e.closed_at), Título: e.exam_title,
+        Código: e.exam_code, Sala: e.sala, Estado: e.estado, 'Duración estimada': e.duracion_min,
+        'Creado por': e.creado_por, URL: e.exam_url,
+      }))
+    }
+
+    return []
   }
 
-  const reportes = [
-    { id: 'accesos',       label: 'Todos los accesos',    desc: 'Historial completo con fecha, hora, duración', color: 'blue'  },
-    { id: 'fallidos',      label: 'Accesos fallidos',     desc: 'Solo los intentos rechazados',                 color: 'red'   },
-    { id: 'alertas',       label: 'Alertas de seguridad', desc: 'Eventos de alerta del período',                color: 'amber' },
-    { id: 'uso_por_curso', label: 'Uso por curso',        desc: 'Resumen de accesos y tiempo por curso',        color: 'green' },
-  ]
-  const colorMap: Record<string, string> = {
-    blue: 'border-blue-900/50 hover:border-blue-700', red: 'border-red-900/50 hover:border-red-700',
-    amber: 'border-amber-900/50 hover:border-amber-700', green: 'border-emerald-900/50 hover:border-emerald-700',
+  async function exportReport(report: ReportDef, format: 'xlsx' | 'csv') {
+    setGenerating(`${report.id}-${format}`)
+    try {
+      const rows = await getReportData(report.id)
+      if (!rows.length) throw new Error('No hay datos para exportar con los filtros seleccionados.')
+      const XLSX = await import('xlsx')
+      const sheet = XLSX.utils.json_to_sheet(rows)
+      const filename = `control_acceso_${report.id}_${params.from}_${params.to}`
+      if (format === 'xlsx') {
+        const book = XLSX.utils.book_new()
+        XLSX.utils.book_append_sheet(book, sheet, report.title.slice(0, 30))
+        XLSX.writeFile(book, `${filename}.xlsx`)
+      } else {
+        const csv = XLSX.utils.sheet_to_csv(sheet)
+        const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(blob)
+        link.download = `${filename}.csv`
+        link.click()
+        URL.revokeObjectURL(link.href)
+      }
+      await registrarEvento({ categoria: 'reporte', tipo_evento: 'reporte_exportado', resultado: 'exitoso', descripcion: `${report.title} exportado en ${format.toUpperCase()}`, datos: { report_id: report.id, format, filters: params, rows: rows.length } })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'No fue posible generar el reporte')
+    } finally {
+      setGenerating(null)
+    }
   }
-  const iconMap: Record<string, string> = { blue: '≡', red: '✗', amber: '⚠', green: '◑' }
 
-  const totalAccesos = stats ? stats.resultados.reduce((s, d) => s + d.value, 0) : 0
+  const groups = useMemo(() => [...new Set(REPORTS.map(r => r.group))], [])
+  const maxBreakdown = Math.max(1, ...breakdown.map(b => b.value))
 
   return (
-    <div className="max-w-5xl mx-auto">
-      <div className="mb-7">
-        <h1 className="text-2xl font-semibold text-slate-100 mb-1">Reportes</h1>
-        <p className="text-slate-600 text-sm">Exportar datos y estadísticas en tiempo real</p>
-      </div>
-
-      {/* Filtros */}
-      <div className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-5 mb-6">
-        <h3 className="text-slate-500 text-xs uppercase tracking-widest mb-4">Parámetros</h3>
-        <div className="grid grid-cols-2 gap-3 mb-3">
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Desde</label>
-            <input type="date" className="input-dark" value={params.desde}
-              onChange={e => setParams(p => ({ ...p, desde: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Hasta</label>
-            <input type="date" className="input-dark" value={params.hasta}
-              onChange={e => setParams(p => ({ ...p, hasta: e.target.value }))} />
-          </div>
+    <div className="max-w-7xl mx-auto report-print-area">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-100">Reportes integrales</h1>
+          <p className="text-slate-600 text-sm mt-1">Incidencias, ingresos, uso, fallas, administración, dispositivos y exámenes con fecha y hora.</p>
         </div>
-        <div className="grid grid-cols-3 gap-3">
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Curso</label>
-            <input className="input-dark" placeholder="3° A Medio" value={params.curso}
-              onChange={e => setParams(p => ({ ...p, curso: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Notebook</label>
-            <input className="input-dark" placeholder="NB-SALA-01" value={params.notebook}
-              onChange={e => setParams(p => ({ ...p, notebook: e.target.value }))} />
-          </div>
-          <div>
-            <label className="text-slate-600 text-xs block mb-1">Sala</label>
-            <input className="input-dark" placeholder="Sala de Computacion" value={params.sala}
-              onChange={e => setParams(p => ({ ...p, sala: e.target.value }))} />
-          </div>
-        </div>
-      </div>
+        <button className="btn-secondary no-print" onClick={() => window.print()}>Imprimir / Guardar PDF</button>
+      </header>
 
-      {/* Cards exportar */}
-      <div className="grid grid-cols-2 gap-4 mb-10">
-        {reportes.map(r => (
-          <button key={r.id} onClick={() => exportar(r.id)} disabled={generando === r.id}
-            className={`text-left bg-[#0d1520] border rounded-xl p-5 transition-colors ${colorMap[r.color]} ${generando === r.id ? 'opacity-60 cursor-wait' : 'cursor-pointer'}`}>
-            <div className="text-2xl mb-3 opacity-40">{iconMap[r.color]}</div>
-            <div className="text-slate-200 font-medium text-sm mb-1">{r.label}</div>
-            <div className="text-slate-600 text-xs mb-4">{r.desc}</div>
-            <div className={`text-xs font-semibold ${generando === r.id ? 'text-slate-500' : 'text-blue-500'}`}>
-              {generando === r.id ? 'Generando...' : '↓ Exportar .xlsx'}
+      {error && <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3 text-red-300 text-sm no-print">{error}</div>}
+
+      <section className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-5 mb-6 no-print">
+        <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3 mb-3">
+          <Field label="Desde"><input type="date" className="input-dark" value={params.from} onChange={e => setParams(p => ({ ...p, from: e.target.value }))} /></Field>
+          <Field label="Hasta"><input type="date" className="input-dark" value={params.to} onChange={e => setParams(p => ({ ...p, to: e.target.value }))} /></Field>
+          <Field label="Curso"><input className="input-dark" placeholder="4° Medio A" value={params.course} onChange={e => setParams(p => ({ ...p, course: e.target.value }))} /></Field>
+          <Field label="Notebook"><input className="input-dark" placeholder="NB-SALA-41" value={params.notebook} onChange={e => setParams(p => ({ ...p, notebook: e.target.value }))} /></Field>
+        </div>
+        <div className="grid md:grid-cols-2 xl:grid-cols-4 gap-3">
+          <Field label="Sala"><input className="input-dark" placeholder="Sala de Computación" value={params.room} onChange={e => setParams(p => ({ ...p, room: e.target.value }))} /></Field>
+          <Field label="Severidad"><select className="input-dark" value={params.severity} onChange={e => setParams(p => ({ ...p, severity: e.target.value }))}><option value="">Todas</option>{['critica','alta','media','baja','informativa'].map(x => <option key={x}>{x}</option>)}</select></Field>
+          <div className="xl:col-span-2 flex items-end"><button className="btn-primary" onClick={loadStats}>Actualizar estadísticas</button></div>
+        </div>
+      </section>
+
+      <section className="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-7">
+        <Metric label="Eventos" value={stats.events} />
+        <Metric label="Incidencias" value={stats.incidents} danger={stats.incidents > 0} />
+        <Metric label="Accesos fallidos" value={stats.failures} danger={stats.failures > 0} />
+        <Metric label="Equipos online" value={stats.online} />
+        <Metric label="Equipos offline" value={stats.offline} danger={stats.offline > 0} />
+        <Metric label="Comandos fallidos" value={stats.commandsFailed} danger={stats.commandsFailed > 0} />
+      </section>
+
+      <section className="grid xl:grid-cols-[1fr_360px] gap-6">
+        <div className="space-y-7 no-print">
+          {groups.map(group => (
+            <div key={group}>
+              <h2 className="text-slate-300 font-semibold mb-3">{group}</h2>
+              <div className="grid md:grid-cols-2 gap-3">
+                {REPORTS.filter(r => r.group === group).map(report => (
+                  <article key={report.id} className={`rounded-xl border bg-[#0d1520] p-5 ${toneBorder(report.tone)}`}>
+                    <div className="text-slate-200 font-medium text-sm">{report.title}</div>
+                    <p className="text-slate-600 text-xs mt-1 min-h-8">{report.description}</p>
+                    <div className="flex gap-3 mt-4">
+                      <button className="text-blue-500 text-xs hover:text-blue-300" disabled={!!generating} onClick={() => exportReport(report, 'xlsx')}>{generating === `${report.id}-xlsx` ? 'Generando...' : '↓ Excel'}</button>
+                      <button className="text-slate-400 text-xs hover:text-slate-200" disabled={!!generating} onClick={() => exportReport(report, 'csv')}>{generating === `${report.id}-csv` ? 'Generando...' : '↓ CSV'}</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
             </div>
-          </button>
-        ))}
-      </div>
-
-      {/* Gráficos donut */}
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-slate-200 font-semibold text-lg">Estadísticas visuales</h2>
-        <div className="flex items-center gap-2 text-xs text-slate-500">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-          Actualizando en tiempo real
+          ))}
         </div>
-      </div>
 
-      {loadingStats ? (
-        <div className="text-slate-600 text-sm text-center py-12">Cargando estadísticas...</div>
-      ) : !stats ? null : (
-        <div className="grid grid-cols-2 gap-5">
-          <DonutChart
-            data={stats.resultados}
-            titulo="Resultados de acceso"
-            total={totalAccesos}
-          />
-          <DonutChart
-            data={stats.cursos}
-            titulo="Accesos por curso"
-            total={stats.cursos.reduce((s, d) => s + d.value, 0)}
-          />
-          <DonutChart
-            data={stats.notebooks}
-            titulo="Uso por notebook"
-            total={stats.notebooks.reduce((s, d) => s + d.value, 0)}
-          />
-          <DonutChart
-            data={stats.porHora}
-            titulo="Accesos por hora del día"
-            total={stats.porHora.reduce((s, d) => s + d.value, 0)}
-          />
-        </div>
-      )}
+        <aside className="rounded-xl border border-[#1a2a40] bg-[#0d1520] p-5 h-fit">
+          <h2 className="text-slate-200 font-medium">Distribución de eventos</h2>
+          <p className="text-slate-600 text-xs mt-1 mb-5">Período y filtros seleccionados.</p>
+          {breakdown.length === 0 ? <div className="text-slate-600 text-xs py-10 text-center">Sin datos</div> : (
+            <div className="space-y-4">
+              {breakdown.map(item => (
+                <div key={item.label}>
+                  <div className="flex justify-between text-xs mb-1.5"><span className="text-slate-400 capitalize">{item.label}</span><span className="text-slate-500 font-mono">{item.value}</span></div>
+                  <div className="h-2 rounded-full bg-[#09111c] overflow-hidden"><div className="h-full bg-blue-600 rounded-full" style={{ width: `${Math.max(4, item.value / maxBreakdown * 100)}%` }} /></div>
+                </div>
+              ))}
+            </div>
+          )}
+        </aside>
+      </section>
+
+      <section className="hidden print:block mt-8">
+        <h2>Resumen del período</h2>
+        <p>Desde {params.from} hasta {params.to}. Eventos: {stats.events}. Incidencias: {stats.incidents}. Accesos fallidos: {stats.failures}. Equipos online: {stats.online}. Equipos offline: {stats.offline}.</p>
+      </section>
     </div>
   )
 }
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) { return <div><label className="text-slate-600 text-xs block mb-1">{label}</label>{children}</div> }
+function Metric({ label, value, danger }: { label: string; value: number; danger?: boolean }) { return <div className={`rounded-xl border p-4 bg-[#0d1520] ${danger ? 'border-red-900/60' : 'border-[#1a2a40]'}`}><div className="text-slate-600 text-[10px] uppercase tracking-widest">{label}</div><div className={`text-2xl font-bold mt-2 ${danger ? 'text-red-400' : 'text-slate-200'}`}>{value}</div></div> }
+function toneBorder(tone: string) { const map: Record<string, string> = { red: 'border-red-900/50', amber: 'border-amber-900/50', green: 'border-emerald-900/50', blue: 'border-blue-900/50', purple: 'border-purple-900/50', cyan: 'border-cyan-900/50' }; return map[tone] || 'border-[#1a2a40]' }

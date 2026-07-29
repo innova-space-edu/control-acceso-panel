@@ -1,169 +1,188 @@
 'use client'
-import { useEffect, useState } from 'react'
+
+import { useEffect, useMemo, useState } from 'react'
+import { adminAction } from '@/lib/admin-api'
+import { formatDateTime } from '@/lib/format'
 import { supabase, type SolicitudOverride } from '@/lib/supabase'
 
-export default function OverridePage() {
-  const [solicitudes, setSolicitudes] = useState<SolicitudOverride[]>([])
-  const [loading, setLoading] = useState(true)
-  const [aprobando, setAprobando] = useState<string | null>(null)
+type DecisionModal = {
+  ids: string[]
+  decision: 'aprobado' | 'rechazado'
+  single?: SolicitudOverride
+} | null
 
-  // Modal de aprobación
-  const [modal, setModal] = useState<{ id: string; notebook: string } | null>(null)
-  const [form, setForm] = useState({ rut: '', nombre: '', detalle: '', rol: 'estudiante' })
-  const [buscando, setBuscando] = useState(false)
-  const [errorBusqueda, setErrorBusqueda] = useState('')
+export default function OverridePage() {
+  const [items, setItems] = useState<SolicitudOverride[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [filter, setFilter] = useState('pendiente')
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [modal, setModal] = useState<DecisionModal>(null)
+  const [reason, setReason] = useState('')
+  const [duration, setDuration] = useState(60)
+  const [saving, setSaving] = useState(false)
+  const [person, setPerson] = useState({ rut: '', nombre: '', detalle: '', rol: 'estudiante' })
+  const [searching, setSearching] = useState(false)
 
   useEffect(() => {
-    cargar()
-    const canal = supabase
-      .channel('override_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, () => cargar())
+    load()
+    const channel = supabase
+      .channel('override_control_masivo')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'comandos_remotos' }, load)
       .subscribe()
-    return () => { supabase.removeChannel(canal) }
+    return () => { supabase.removeChannel(channel) }
   }, [])
 
-  async function cargar() {
-    const { data } = await supabase
+  async function load() {
+    const { data, error: loadError } = await supabase
       .from('solicitudes_override')
       .select('*')
       .order('creado_en', { ascending: false })
-      .limit(50)
-    setSolicitudes(data || [])
+      .limit(500)
+    if (loadError) setError(loadError.message)
+    else {
+      setItems((data || []) as SolicitudOverride[])
+      setError('')
+    }
     setLoading(false)
   }
 
-  function abrirModal(id: string, notebook: string) {
-    setModal({ id, notebook })
-    setForm({ rut: '', nombre: '', detalle: '', rol: 'estudiante' })
-    setErrorBusqueda('')
+  const filtered = useMemo(() => filter === 'todos' ? items : items.filter(i => i.estado === filter), [items, filter])
+  const pending = items.filter(i => i.estado === 'pendiente')
+
+  function toggle(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }
 
-  async function buscarRut() {
-    if (!form.rut) return
-    setBuscando(true)
-    setErrorBusqueda('')
+  function openModal(ids: string[], decision: 'aprobado' | 'rechazado', single?: SolicitudOverride) {
+    setReason('')
+    setDuration(60)
+    setPerson({ rut: '', nombre: '', detalle: '', rol: 'estudiante' })
+    setModal({ ids, decision, single })
+  }
 
-    const rut = form.rut.trim()
+  async function searchRut() {
+    const rut = person.rut.trim()
+    if (!rut) return
+    setSearching(true)
+    setError('')
+    const [{ data: student }, { data: teacher }] = await Promise.all([
+      supabase.from('estudiantes').select('nombre,curso').eq('rut', rut).maybeSingle(),
+      supabase.from('docentes').select('nombre,especialidad').eq('rut', rut).maybeSingle(),
+    ])
+    if (student) setPerson(p => ({ ...p, nombre: student.nombre, detalle: student.curso, rol: 'estudiante' }))
+    else if (teacher) setPerson(p => ({ ...p, nombre: teacher.nombre, detalle: teacher.especialidad || 'Docente', rol: 'docente' }))
+    else setError('RUT no encontrado. Puedes ingresar los datos manualmente si corresponde.')
+    setSearching(false)
+  }
 
-    // Buscar en estudiantes
-    const { data: est } = await supabase
-      .from('estudiantes')
-      .select('nombre, curso')
-      .eq('rut', rut)
-      .single()
-
-    if (est) {
-      setForm(f => ({ ...f, nombre: est.nombre, detalle: est.curso, rol: 'estudiante' }))
-      setBuscando(false)
-      return
+  async function submit() {
+    if (!modal || !reason.trim()) return
+    setSaving(true)
+    setError('')
+    try {
+      await adminAction({
+        action: 'bulk_override',
+        request_ids: modal.ids,
+        decision: modal.decision,
+        reason,
+        duration_minutes: duration,
+        person: modal.ids.length === 1 ? person : undefined,
+      })
+      setSuccess(`${modal.ids.length} solicitud${modal.ids.length === 1 ? '' : 'es'} ${modal.decision === 'aprobado' ? 'aprobada(s)' : 'rechazada(s)'}.`)
+      setTimeout(() => setSuccess(''), 4000)
+      setSelected(new Set())
+      setModal(null)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'No fue posible procesar las solicitudes')
+    } finally {
+      setSaving(false)
     }
-
-    // Buscar en docentes
-    const { data: doc } = await supabase
-      .from('docentes')
-      .select('nombre, especialidad')
-      .eq('rut', rut)
-      .single()
-
-    if (doc) {
-      setForm(f => ({ ...f, nombre: doc.nombre, detalle: doc.especialidad || 'Docente', rol: 'docente' }))
-      setBuscando(false)
-      return
-    }
-
-    setErrorBusqueda('RUT no encontrado en el sistema')
-    setBuscando(false)
   }
-
-  async function aprobar() {
-    if (!modal || !form.nombre) return
-    setAprobando(modal.id)
-    await supabase.from('solicitudes_override').update({
-      estado:          'aprobado',
-      rut_override:    form.rut,
-      nombre_override: form.nombre,
-      curso_override:  form.detalle,
-      resuelto_por:    'Administrador',
-      resuelto_en:     new Date().toISOString(),
-    }).eq('id', modal.id)
-    setModal(null)
-    setAprobando(null)
-    await cargar()
-  }
-
-  async function rechazar(id: string) {
-    await supabase.from('solicitudes_override').update({
-      estado:       'rechazado',
-      resuelto_por: 'Administrador',
-      resuelto_en:  new Date().toISOString(),
-    }).eq('id', id)
-    await cargar()
-  }
-
-  const pendientes = solicitudes.filter(s => s.estado === 'pendiente')
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="mb-7">
-        <div className="flex items-center gap-3 mb-1">
-          <h1 className="text-2xl font-semibold text-slate-100">Override / Desbloqueo</h1>
-          {pendientes.length > 0 && (
-            <span className="badge badge-purple ping-slow">{pendientes.length} esperando</span>
-          )}
+    <div className="max-w-6xl mx-auto">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-semibold text-slate-100">Desbloqueo y autorizaciones</h1>
+            {pending.length > 0 && <span className="badge badge-purple ping-slow">{pending.length} pendientes</span>}
+          </div>
+          <p className="text-slate-600 text-sm mt-1">Autoriza de forma individual, por selección o todas las solicitudes pendientes.</p>
         </div>
-        <p className="text-slate-600 text-sm">
-          Cuando un alumno o docente no puede ingresar, solicita ayuda desde el notebook. Aparece aquí.
-        </p>
-      </div>
+        {pending.length > 0 && (
+          <button className="btn-primary" onClick={() => openModal(pending.map(i => i.id), 'aprobado')}>Desbloquear todos los pendientes</button>
+        )}
+      </header>
 
-      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
-        <table className="tabla w-full">
+      {error && <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3 text-red-300 text-sm">{error}</div>}
+      {success && <div className="mb-4 rounded-xl border border-emerald-900/50 bg-emerald-950/20 px-4 py-3 text-emerald-300 text-sm">✓ {success}</div>}
+
+      <section className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-4 mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex rounded-lg overflow-hidden border border-[#1a2a40]">
+          {['pendiente', 'aprobado', 'rechazado', 'todos'].map(value => (
+            <button key={value} onClick={() => setFilter(value)} className={`px-4 py-2 text-xs capitalize ${filter === value ? 'bg-blue-900/40 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}>{value}</button>
+          ))}
+        </div>
+        {selected.size > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-slate-500 text-xs">{selected.size} seleccionadas</span>
+            <button className="btn-primary text-xs" onClick={() => openModal([...selected], 'aprobado')}>Desbloquear seleccionadas</button>
+            <button className="btn-danger text-xs" onClick={() => openModal([...selected], 'rechazado')}>Rechazar seleccionadas</button>
+          </div>
+        )}
+      </section>
+
+      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-x-auto">
+        <table className="tabla min-w-[1050px] w-full">
           <thead>
             <tr>
+              <th><input type="checkbox" checked={filtered.filter(i => i.estado === 'pendiente').length > 0 && filtered.filter(i => i.estado === 'pendiente').every(i => selected.has(i.id))} onChange={e => setSelected(e.target.checked ? new Set(filtered.filter(i => i.estado === 'pendiente').map(i => i.id)) : new Set())} /></th>
               <th>Estado</th>
               <th>Notebook</th>
               <th>Solicitado</th>
-              <th>Aprobado para</th>
+              <th>Autorizado para</th>
+              <th>Motivo / duración</th>
+              <th>Resuelto por</th>
               <th>Acciones</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="text-center text-slate-600 py-10">Cargando...</td></tr>
-            ) : solicitudes.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="text-center py-16">
-                  <div className="text-3xl mb-3 opacity-20">⊕</div>
-                  <div className="text-slate-600 text-sm">Sin solicitudes de override</div>
-                </td>
-              </tr>
-            ) : solicitudes.map(s => (
-              <tr key={s.id} className={s.estado !== 'pendiente' ? 'opacity-40' : ''}>
+              <tr><td colSpan={8} className="text-center text-slate-600 py-12">Cargando solicitudes...</td></tr>
+            ) : filtered.length === 0 ? (
+              <tr><td colSpan={8} className="text-center text-slate-600 py-14">Sin solicitudes en este estado.</td></tr>
+            ) : filtered.map(item => (
+              <tr key={item.id} className={item.estado !== 'pendiente' ? 'opacity-60' : ''}>
+                <td>{item.estado === 'pendiente' ? <input type="checkbox" checked={selected.has(item.id)} onChange={() => toggle(item.id)} /> : null}</td>
+                <td><StatusBadge value={item.estado} /></td>
+                <td className="font-mono text-xs text-slate-300">{item.notebook_id}</td>
+                <td className="text-xs">{formatDateTime(item.creado_en)}</td>
                 <td>
-                  {s.estado === 'pendiente'  && <span className="badge badge-purple ping-slow">Pendiente</span>}
-                  {s.estado === 'aprobado'   && <span className="badge badge-green">Aprobado</span>}
-                  {s.estado === 'rechazado'  && <span className="badge badge-red">Rechazado</span>}
+                  {item.nombre_override ? (
+                    <><div className="text-slate-300 text-xs">{item.nombre_override}</div><div className="text-slate-600 font-mono text-[11px]">{item.rut_override} · {item.curso_override}</div></>
+                  ) : <span className="text-slate-600">—</span>}
                 </td>
-                <td className="font-mono text-xs">{s.notebook_id}</td>
-                <td className="font-mono text-xs">{new Date(s.creado_en).toLocaleTimeString('es-CL')}</td>
-                <td className="text-xs">{s.nombre_override || <span className="text-slate-600">—</span>}</td>
                 <td>
-                  {s.estado === 'pendiente' && (
+                  <div className="text-slate-500 text-xs max-w-[220px] truncate" title={item.motivo || ''}>{item.motivo || '—'}</div>
+                  {item.duracion_minutos && <div className="text-slate-700 text-[11px] mt-1">{item.duracion_minutos} min</div>}
+                </td>
+                <td className="text-xs">{item.resuelto_por || '—'}</td>
+                <td>
+                  {item.estado === 'pendiente' ? (
                     <div className="flex gap-3">
-                      <button
-                        onClick={() => abrirModal(s.id, s.notebook_id)}
-                        className="btn-primary text-xs py-1.5 px-3"
-                      >
-                        Aprobar
-                      </button>
-                      <button
-                        onClick={() => rechazar(s.id)}
-                        className="text-xs text-red-500 hover:text-red-300 transition-colors"
-                      >
-                        Rechazar
-                      </button>
+                      <button className="text-blue-500 text-xs hover:text-blue-300" onClick={() => openModal([item.id], 'aprobado', item)}>Aprobar individual</button>
+                      <button className="text-red-500 text-xs hover:text-red-300" onClick={() => openModal([item.id], 'rechazado', item)}>Rechazar</button>
                     </div>
-                  )}
+                  ) : <span className="text-slate-700 text-xs">Finalizada</span>}
                 </td>
               </tr>
             ))}
@@ -171,76 +190,54 @@ export default function OverridePage() {
         </table>
       </div>
 
-      {/* Modal de aprobación */}
       {modal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#0d1520] border border-[#1e3a5f] rounded-2xl p-7 w-full max-w-md">
-            <h2 className="text-slate-100 font-semibold text-lg mb-1">Aprobar acceso</h2>
-            <p className="text-slate-600 text-xs mb-6">Notebook: <span className="font-mono text-slate-400">{modal.notebook}</span></p>
+        <div className="modal-backdrop">
+          <div className="modal-card max-w-2xl max-h-[90vh] overflow-y-auto">
+            <h2 className="text-slate-100 text-xl font-semibold">{modal.decision === 'aprobado' ? 'Confirmar desbloqueo' : 'Confirmar rechazo'}</h2>
+            <p className="text-slate-500 text-sm mt-2">Se procesarán {modal.ids.length} solicitud{modal.ids.length === 1 ? '' : 'es'}. La operación quedará registrada con administrador, fecha y hora.</p>
 
-            <div className="space-y-4">
-              {/* Campo RUT + buscar */}
-              <div>
-                <label className="text-slate-500 text-xs block mb-1.5">RUT del usuario</label>
-                <div className="flex gap-2">
-                  <input
-                    className="input-dark flex-1"
-                    placeholder="18.324.719-0"
-                    value={form.rut}
-                    onChange={e => setForm(f => ({ ...f, rut: e.target.value }))}
-                    onKeyDown={e => e.key === 'Enter' && buscarRut()}
-                  />
-                  <button
-                    onClick={buscarRut}
-                    disabled={buscando}
-                    className="btn-primary px-4"
-                  >
-                    {buscando ? '...' : 'Buscar'}
-                  </button>
+            {modal.decision === 'aprobado' && modal.ids.length === 1 && (
+              <div className="mt-5 rounded-xl border border-[#1a2a40] bg-[#09111c] p-4">
+                <div className="text-slate-400 text-xs uppercase tracking-widest mb-3">Persona autorizada (opcional)</div>
+                <div className="grid md:grid-cols-[1fr_auto] gap-2">
+                  <input className="input-dark font-mono" placeholder="RUT" value={person.rut} onChange={e => setPerson(p => ({ ...p, rut: e.target.value }))} />
+                  <button className="btn-secondary" onClick={searchRut} disabled={searching}>{searching ? 'Buscando...' : 'Buscar RUT'}</button>
                 </div>
-                {errorBusqueda && <p className="text-red-400 text-xs mt-1">{errorBusqueda}</p>}
+                <div className="grid md:grid-cols-2 gap-3 mt-3">
+                  <input className="input-dark" placeholder="Nombre completo" value={person.nombre} onChange={e => setPerson(p => ({ ...p, nombre: e.target.value }))} />
+                  <input className="input-dark" placeholder="Curso o especialidad" value={person.detalle} onChange={e => setPerson(p => ({ ...p, detalle: e.target.value }))} />
+                </div>
               </div>
+            )}
 
-              {/* Nombre autocompletado o manual */}
-              <div>
-                <label className="text-slate-500 text-xs block mb-1.5">Nombre completo</label>
-                <input
-                  className="input-dark"
-                  placeholder="Se autocompleta al buscar RUT"
-                  value={form.nombre}
-                  onChange={e => setForm(f => ({ ...f, nombre: e.target.value }))}
-                />
+            <label className="text-slate-500 text-xs block mt-5 mb-1.5">Motivo obligatorio</label>
+            <textarea className="input-dark min-h-24" placeholder="Describe por qué se aprueba o rechaza..." value={reason} onChange={e => setReason(e.target.value)} />
+
+            {modal.decision === 'aprobado' && (
+              <div className="mt-4">
+                <label className="text-slate-500 text-xs block mb-1.5">Duración de la autorización</label>
+                <select className="input-dark" value={duration} onChange={e => setDuration(Number(e.target.value))}>
+                  <option value={15}>15 minutos</option>
+                  <option value={30}>30 minutos</option>
+                  <option value={60}>60 minutos</option>
+                  <option value={120}>2 horas</option>
+                  <option value={480}>Jornada de 8 horas</option>
+                </select>
               </div>
+            )}
 
-              <div>
-                <label className="text-slate-500 text-xs block mb-1.5">Curso / Especialidad</label>
-                <input
-                  className="input-dark"
-                  placeholder="3° A Medio"
-                  value={form.detalle}
-                  onChange={e => setForm(f => ({ ...f, detalle: e.target.value }))}
-                />
-              </div>
-            </div>
-
-            <div className="flex gap-3 mt-7">
-              <button
-                onClick={aprobar}
-                disabled={!form.nombre || aprobando === modal.id}
-                className="btn-primary flex-1"
-              >
-                {aprobando === modal.id ? 'Aprobando...' : 'Confirmar y desbloquear notebook'}
-              </button>
-              <button
-                onClick={() => setModal(null)}
-                className="px-4 py-2 rounded-lg border border-[#1e3a5f] text-slate-500 text-sm hover:text-slate-300 transition-colors"
-              >
-                Cancelar
-              </button>
+            <div className="flex gap-3 mt-6">
+              <button className={modal.decision === 'aprobado' ? 'btn-primary flex-1' : 'btn-danger flex-1'} disabled={!reason.trim() || saving} onClick={submit}>{saving ? 'Procesando...' : modal.decision === 'aprobado' ? 'Confirmar y desbloquear' : 'Confirmar rechazo'}</button>
+              <button className="btn-secondary" onClick={() => setModal(null)}>Cancelar</button>
             </div>
           </div>
         </div>
       )}
     </div>
   )
+}
+
+function StatusBadge({ value }: { value: string }) {
+  const map: Record<string, string> = { pendiente: 'badge-purple', aprobado: 'badge-green', rechazado: 'badge-red' }
+  return <span className={`badge ${map[value] || 'badge-gray'}`}>{value}</span>
 }

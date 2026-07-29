@@ -1,344 +1,219 @@
 'use client'
-import { useEffect, useState } from 'react'
-import { supabase, type Alerta } from '@/lib/supabase'
 
-const TIPO_LABEL: Record<string, string> = {
-  duplicado:       '⚠ Duplicado',
-  exceso_intentos: '🔒 Exceso intentos',
-  rut_invalido:    '✗ RUT inválido',
-  sospechoso:      '⚑ Sospechoso',
-}
-const TIPO_BADGE: Record<string, string> = {
-  duplicado:       'badge-purple',
-  exceso_intentos: 'badge-red',
-  rut_invalido:    'badge-amber',
-  sospechoso:      'badge-red',
+import { useEffect, useMemo, useState } from 'react'
+import { adminAction } from '@/lib/admin-api'
+import { formatDateTime } from '@/lib/format'
+import { supabase, type EstadoIncidencia, type Incidencia, type Severidad } from '@/lib/supabase'
+
+const STATE_LABEL: Record<string, string> = {
+  nueva: 'Nueva', en_revision: 'En revisión', asignada: 'Asignada',
+  accion_ejecutada: 'Acción ejecutada', resuelta: 'Resuelta', falsa_alarma: 'Falsa alarma',
 }
 
-interface SesionActiva {
-  notebook_id: string
-  rut: string
-  inicio: string
-}
-
-interface ModalDuplicado {
-  alerta: Alerta
-  sesiones: SesionActiva[]
-}
-
-export default function AlertasPage() {
-  const [alertas, setAlertas]           = useState<Alerta[]>([])
-  const [loading, setLoading]           = useState(true)
-  const [filtro, setFiltro]             = useState<'pendientes' | 'todas'>('pendientes')
-  const [resolviendo, setResolviendo]   = useState<string | null>(null)
-  const [modal, setModal]               = useState<ModalDuplicado | null>(null)
-  const [cerrandoSesion, setCerrandoSesion] = useState<string | null>(null)
-  const [msgError, setMsgError]         = useState('')
-  const [msgExito, setMsgExito]         = useState('')
+export default function IncidentsPage() {
+  const [items, setItems] = useState<Incidencia[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [filters, setFilters] = useState({ state: 'abiertas', severity: '', query: '' })
+  const [selected, setSelected] = useState<Incidencia | null>(null)
+  const [newState, setNewState] = useState<EstadoIncidencia>('en_revision')
+  const [resolution, setResolution] = useState('')
+  const [saving, setSaving] = useState(false)
 
   useEffect(() => {
-    cargar()
-    const canal = supabase
-      .channel('alertas_live')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'alertas' }, () => cargar())
+    load()
+    const channel = supabase
+      .channel('incidencias_live')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, load)
       .subscribe()
-    return () => { supabase.removeChannel(canal) }
-  }, [filtro])
+    return () => { supabase.removeChannel(channel) }
+  }, [])
 
-  async function cargar() {
-    setLoading(true)
-    let q = supabase.from('alertas').select('*').order('timestamp', { ascending: false }).limit(100)
-    if (filtro === 'pendientes') q = q.eq('resuelta', false)
-    const { data, error } = await q
-    if (error) {
-      setMsgError('Error al cargar alertas: ' + error.message)
-    } else {
-      setAlertas(data || [])
-      setMsgError('')
+  async function load() {
+    const { data, error: loadError } = await supabase
+      .from('incidencias')
+      .select('*')
+      .order('creada_en', { ascending: false })
+      .limit(500)
+    if (loadError) setError('Ejecuta la migración del centro de control: ' + loadError.message)
+    else {
+      setItems((data || []) as Incidencia[])
+      setError('')
     }
     setLoading(false)
   }
 
-  async function resolver(id: string) {
-    setResolviendo(id)
-    setMsgError('')
-    const { error } = await supabase
-      .from('alertas')
-      .update({ resuelta: true })
-      .eq('id', id)
-    if (error) {
-      setMsgError('Error al resolver: ' + error.message)
-    } else {
-      setMsgExito('Alerta marcada como resuelta')
-      setTimeout(() => setMsgExito(''), 3000)
-      await cargar()
-    }
-    setResolviendo(null)
+  const filtered = useMemo(() => items.filter(item => {
+    const stateOk = filters.state === 'todas'
+      || (filters.state === 'abiertas' && !['resuelta', 'falsa_alarma'].includes(item.estado))
+      || item.estado === filters.state
+    const severityOk = !filters.severity || item.severidad === filters.severity
+    const text = [item.titulo, item.descripcion, item.tipo, item.notebook_id, item.rut, item.sala].filter(Boolean).join(' ').toLowerCase()
+    return stateOk && severityOk && text.includes(filters.query.toLowerCase())
+  }), [items, filters])
+
+  const counts = useMemo(() => ({
+    open: items.filter(i => !['resuelta', 'falsa_alarma'].includes(i.estado)).length,
+    critical: items.filter(i => i.severidad === 'critica' && !['resuelta', 'falsa_alarma'].includes(i.estado)).length,
+    reviewing: items.filter(i => i.estado === 'en_revision').length,
+  }), [items])
+
+  function openIncident(incident: Incidencia) {
+    setSelected(incident)
+    setNewState(incident.estado === 'nueva' ? 'en_revision' : incident.estado)
+    setResolution(incident.resolucion || '')
   }
 
-  async function resolverTodas() {
-    setMsgError('')
-    const { error } = await supabase
-      .from('alertas')
-      .update({ resuelta: true })
-      .eq('resuelta', false)
-    if (error) {
-      setMsgError('Error al resolver todas: ' + error.message)
-    } else {
-      setMsgExito('Todas las alertas resueltas')
-      setTimeout(() => setMsgExito(''), 3000)
-      await cargar()
+  async function saveIncident() {
+    if (!selected) return
+    if (['resuelta', 'falsa_alarma'].includes(newState) && !resolution.trim()) return
+    setSaving(true)
+    try {
+      await adminAction({
+        action: 'incident',
+        incident_id: selected.id,
+        state: newState,
+        resolution,
+      })
+      setSelected(null)
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'No fue posible actualizar la incidencia')
+    } finally {
+      setSaving(false)
     }
   }
-
-  async function abrirModalDuplicado(alerta: Alerta) {
-    if (!alerta.rut) return
-    const { data } = await supabase
-      .from('sesiones_activas')
-      .select('notebook_id, rut, inicio')
-      .eq('rut', alerta.rut)
-    setModal({ alerta, sesiones: data || [] })
-  }
-
-  async function cerrarSesionNotebook(notebook_id: string, alertaId: string) {
-    setCerrandoSesion(notebook_id)
-    setMsgError('')
-
-    // Señal al kiosk: forzar_cierre = true
-    const { error: e1 } = await supabase
-      .from('sesiones_activas')
-      .update({ forzar_cierre: true })
-      .eq('notebook_id', notebook_id)
-
-    if (e1) {
-      // Si forzar_cierre no existe, eliminar directamente
-      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
-    } else {
-      // Esperar que el kiosk procese
-      await new Promise(r => setTimeout(r, 4000))
-      await supabase.from('sesiones_activas').delete().eq('notebook_id', notebook_id)
-    }
-
-    // Cerrar acceso activo
-    const { data: accesos } = await supabase
-      .from('accesos')
-      .select('id')
-      .eq('notebook_id', notebook_id)
-      .is('timestamp_fin', null)
-      .order('timestamp_inicio', { ascending: false })
-      .limit(1)
-    if (accesos && accesos.length > 0) {
-      await supabase.from('accesos')
-        .update({ timestamp_fin: new Date().toISOString() })
-        .eq('id', accesos[0].id)
-    }
-
-    await resolver(alertaId)
-    setModal(null)
-    setCerrandoSesion(null)
-    setMsgExito('Sesión cerrada correctamente')
-    setTimeout(() => setMsgExito(''), 3000)
-  }
-
-  async function cerrarTodasSesiones(rut: string, alertaId: string) {
-    setCerrandoSesion('todas')
-    setMsgError('')
-
-    const { error: e1 } = await supabase
-      .from('sesiones_activas')
-      .update({ forzar_cierre: true })
-      .eq('rut', rut)
-
-    if (!e1) {
-      await new Promise(r => setTimeout(r, 4000))
-    }
-
-    // Cerrar accesos abiertos
-    const { data: accesos } = await supabase
-      .from('accesos')
-      .select('id')
-      .eq('rut', rut)
-      .is('timestamp_fin', null)
-    if (accesos) {
-      for (const a of accesos) {
-        await supabase.from('accesos')
-          .update({ timestamp_fin: new Date().toISOString() })
-          .eq('id', a.id)
-      }
-    }
-
-    await supabase.from('sesiones_activas').delete().eq('rut', rut)
-    await resolver(alertaId)
-    setModal(null)
-    setCerrandoSesion(null)
-    setMsgExito('Todas las sesiones cerradas')
-    setTimeout(() => setMsgExito(''), 3000)
-  }
-
-  const pendientes = alertas.filter(a => !a.resuelta)
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <div className="mb-7 flex items-start justify-between">
+    <div className="max-w-7xl mx-auto">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold text-slate-100 mb-1">Alertas de seguridad</h1>
-          <p className="text-slate-600 text-sm">Eventos detectados por los notebooks</p>
+          <h1 className="text-2xl font-semibold text-slate-100">Centro de incidencias</h1>
+          <p className="text-slate-600 text-sm mt-1">Alertas, investigación, acciones, responsables y resolución documentada.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {pendientes.length > 1 && (
-            <button onClick={resolverTodas}
-              className="text-xs text-slate-500 hover:text-slate-300 border border-[#1a2a40] rounded-lg px-3 py-2 transition-colors">
-              Resolver todas
-            </button>
-          )}
-          <div className="flex rounded-lg overflow-hidden border border-[#1a2a40]">
-            {(['pendientes', 'todas'] as const).map(f => (
-              <button key={f} onClick={() => setFiltro(f)}
-                className={`px-4 py-2 text-xs font-medium transition-colors ${
-                  filtro === f ? 'bg-blue-900/40 text-blue-400' : 'text-slate-500 hover:text-slate-300'
-                }`}>
-                {f === 'pendientes' ? `Pendientes (${pendientes.length})` : 'Todas'}
-              </button>
-            ))}
-          </div>
+        <div className="flex gap-2">
+          <span className="badge badge-red">{counts.critical} críticas</span>
+          <span className="badge badge-amber">{counts.open} abiertas</span>
+          <span className="badge badge-blue">{counts.reviewing} en revisión</span>
         </div>
-      </div>
+      </header>
 
-      {/* Mensajes */}
-      {msgError && (
-        <div className="bg-red-950/30 border border-red-900/50 rounded-xl px-5 py-3 mb-4 text-red-400 text-sm">
-          {msgError}
-        </div>
-      )}
-      {msgExito && (
-        <div className="bg-emerald-950/30 border border-emerald-900/50 rounded-xl px-5 py-3 mb-4 text-emerald-400 text-sm">
-          ✓ {msgExito}
-        </div>
-      )}
+      {error && <div className="mb-4 rounded-xl border border-red-900/50 bg-red-950/20 px-4 py-3 text-red-300 text-sm">{error}</div>}
 
-      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
-        <table className="tabla w-full">
+      <section className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-4 mb-4 grid md:grid-cols-[1fr_190px_190px_auto] gap-3">
+        <input className="input-dark" placeholder="Buscar notebook, RUT, tipo o descripción..." value={filters.query} onChange={e => setFilters(f => ({ ...f, query: e.target.value }))} />
+        <select className="input-dark" value={filters.state} onChange={e => setFilters(f => ({ ...f, state: e.target.value }))}>
+          <option value="abiertas">Todas las abiertas</option>
+          <option value="todas">Todos los estados</option>
+          {Object.entries(STATE_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        </select>
+        <select className="input-dark" value={filters.severity} onChange={e => setFilters(f => ({ ...f, severity: e.target.value }))}>
+          <option value="">Toda severidad</option>
+          <option value="critica">Crítica</option>
+          <option value="alta">Alta</option>
+          <option value="media">Media</option>
+          <option value="baja">Baja</option>
+          <option value="informativa">Informativa</option>
+        </select>
+        <button className="btn-secondary" onClick={load}>Actualizar</button>
+      </section>
+
+      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-x-auto">
+        <table className="tabla min-w-[1150px] w-full">
           <thead>
             <tr>
-              <th>Tipo</th>
+              <th>Severidad</th>
+              <th>Estado</th>
+              <th>Incidencia</th>
               <th>Notebook</th>
-              <th>RUT</th>
-              <th>Descripción</th>
-              <th>Hora</th>
+              <th>RUT / sala</th>
+              <th>Creada</th>
+              <th>Responsable</th>
               <th>Acción</th>
             </tr>
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="text-center text-slate-600 py-10">Cargando...</td></tr>
-            ) : alertas.length === 0 ? (
-              <tr>
-                <td colSpan={6} className="text-center py-16">
-                  <div className="text-3xl mb-3 opacity-20">✓</div>
-                  <div className="text-slate-600 text-sm">Sin alertas pendientes</div>
+              <tr><td colSpan={8} className="text-center text-slate-600 py-12">Cargando incidencias...</td></tr>
+            ) : filtered.length === 0 ? (
+              <tr><td colSpan={8} className="text-center py-16"><div className="text-3xl opacity-20 mb-2">✓</div><div className="text-slate-600 text-sm">Sin incidencias para estos filtros</div></td></tr>
+            ) : filtered.map(item => (
+              <tr key={item.id} className={item.severidad === 'critica' && !['resuelta', 'falsa_alarma'].includes(item.estado) ? 'bg-red-950/10' : ''}>
+                <td><SeverityBadge value={item.severidad} /></td>
+                <td><StateBadge value={item.estado} /></td>
+                <td className="max-w-[330px]">
+                  <div className="text-slate-200 text-sm font-medium">{item.titulo}</div>
+                  <div className="text-slate-500 text-xs mt-1 line-clamp-2">{item.descripcion || 'Sin descripción'}</div>
+                  <div className="text-slate-700 text-[11px] mt-1">{item.tipo}</div>
                 </td>
-              </tr>
-            ) : alertas.map(a => (
-              <tr key={a.id} className={a.resuelta ? 'opacity-40' : ''}>
+                <td className="font-mono text-xs">{item.notebook_id || '—'}</td>
                 <td>
-                  <span className={`badge ${TIPO_BADGE[a.tipo] || 'badge-gray'}`}>
-                    {TIPO_LABEL[a.tipo] || a.tipo}
-                  </span>
+                  <div className="font-mono text-xs">{item.rut || '—'}</div>
+                  <div className="text-slate-600 text-[11px] mt-1">{item.sala || '—'}</div>
                 </td>
-                <td className="font-mono text-xs">{a.notebook_id || '—'}</td>
-                <td className="font-mono text-xs">{a.rut || '—'}</td>
-                <td className="text-xs max-w-[220px] truncate" title={a.descripcion || ''}>
-                  {a.descripcion || '—'}
-                </td>
-                <td className="font-mono text-xs">
-                  {new Date(a.timestamp).toLocaleString('es-CL')}
-                </td>
-                <td>
-                  {a.resuelta ? (
-                    <span className="badge badge-green text-[10px]">✓ Resuelta</span>
-                  ) : a.tipo === 'duplicado' ? (
-                    <button
-                      onClick={() => abrirModalDuplicado(a)}
-                      className="text-xs text-purple-400 hover:text-purple-300 transition-colors font-medium">
-                      Gestionar →
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => resolver(a.id)}
-                      disabled={resolviendo === a.id}
-                      className="text-xs text-blue-500 hover:text-blue-300 disabled:opacity-50 transition-colors">
-                      {resolviendo === a.id ? '...' : 'Resolver'}
-                    </button>
-                  )}
-                </td>
+                <td className="text-xs">{formatDateTime(item.creada_en)}</td>
+                <td className="text-xs">{item.asignada_nombre || item.resuelta_por_nombre || 'Sin asignar'}</td>
+                <td><button className="text-blue-500 text-xs hover:text-blue-300" onClick={() => openIncident(item)}>Abrir incidencia</button></td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
-      {/* Modal duplicado */}
-      {modal && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#0d1520] border border-purple-900/50 rounded-2xl p-7 w-full max-w-md">
-            <h2 className="text-slate-100 font-semibold text-lg mb-1">Acceso duplicado</h2>
-            <p className="text-slate-500 text-sm mb-5">
-              RUT <span className="text-slate-300 font-mono">{modal.alerta.rut}</span> tiene sesiones en múltiples equipos.
-            </p>
-
-            {modal.sesiones.length > 0 ? (
-              <div className="mb-5 space-y-2">
-                <p className="text-slate-500 text-xs uppercase tracking-widest mb-2">
-                  Sesiones activas ({modal.sesiones.length})
-                </p>
-                {modal.sesiones.map(s => (
-                  <div key={s.notebook_id}
-                    className="flex items-center justify-between bg-[#111c2d] rounded-lg px-4 py-3">
-                    <div>
-                      <div className="text-slate-300 text-sm font-mono">{s.notebook_id}</div>
-                      <div className="text-slate-600 text-xs">
-                        Desde {new Date(s.inicio).toLocaleTimeString('es-CL')}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => cerrarSesionNotebook(s.notebook_id, modal.alerta.id)}
-                      disabled={cerrandoSesion !== null}
-                      className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-50">
-                      {cerrandoSesion === s.notebook_id ? 'Cerrando...' : 'Cerrar sesión'}
-                    </button>
-                  </div>
-                ))}
+      {selected && (
+        <div className="modal-backdrop">
+          <div className="modal-card max-w-2xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="flex gap-2 mb-2"><SeverityBadge value={selected.severidad} /><StateBadge value={selected.estado} /></div>
+                <h2 className="text-slate-100 text-xl font-semibold">{selected.titulo}</h2>
+                <p className="text-slate-500 text-sm mt-2 leading-relaxed">{selected.descripcion || 'Sin descripción'}</p>
               </div>
-            ) : (
-              <div className="mb-5 bg-[#111c2d] rounded-lg px-4 py-3 text-slate-500 text-sm">
-                No hay sesiones activas en este momento
-              </div>
-            )}
+              <button className="text-slate-500 hover:text-slate-200" onClick={() => setSelected(null)}>✕</button>
+            </div>
 
-            <div className="space-y-2">
-              {modal.sesiones.length > 1 && (
-                <button
-                  onClick={() => cerrarTodasSesiones(modal.alerta.rut!, modal.alerta.id)}
-                  disabled={cerrandoSesion !== null}
-                  className="w-full bg-red-900/40 hover:bg-red-900/60 text-red-300 border border-red-900/50 font-medium text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
-                  {cerrandoSesion === 'todas' ? 'Cerrando todas...' : 'Cerrar todas las sesiones'}
-                </button>
+            <div className="grid grid-cols-2 gap-3 mt-5 text-xs">
+              <Info label="Notebook" value={selected.notebook_id || '—'} />
+              <Info label="RUT" value={selected.rut || '—'} />
+              <Info label="Sala" value={selected.sala || '—'} />
+              <Info label="Creada" value={formatDateTime(selected.creada_en)} />
+              <Info label="Tipo" value={selected.tipo} />
+              <Info label="Responsable" value={selected.asignada_nombre || selected.resuelta_por_nombre || 'Sin asignar'} />
+            </div>
+
+            <div className="border-t border-[#1a2a40] mt-6 pt-5">
+              <label className="text-slate-500 text-xs block mb-1.5">Nuevo estado</label>
+              <select className="input-dark" value={newState} onChange={e => setNewState(e.target.value as EstadoIncidencia)}>
+                {Object.entries(STATE_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <label className="text-slate-500 text-xs block mt-4 mb-1.5">Comentario o resolución {['resuelta', 'falsa_alarma'].includes(newState) ? '(obligatorio)' : ''}</label>
+              <textarea className="input-dark min-h-28" value={resolution} onChange={e => setResolution(e.target.value)} placeholder="Describe lo investigado, la acción realizada y el resultado..." />
+            </div>
+
+            <div className="flex flex-wrap gap-3 mt-6">
+              <button className="btn-primary" disabled={saving || (['resuelta', 'falsa_alarma'].includes(newState) && !resolution.trim())} onClick={saveIncident}>{saving ? 'Guardando...' : 'Guardar seguimiento'}</button>
+              {selected.notebook_id && (
+                <button className="btn-secondary" onClick={() => adminAction({ action: 'command', notebook_ids: [selected.notebook_id], type: 'bloquear', reason: `Acción desde incidencia ${selected.id}`, expiry_minutes: 15 })}>Bloquear equipo</button>
               )}
-              <button
-                onClick={() => { resolver(modal.alerta.id); setModal(null) }}
-                disabled={resolviendo !== null}
-                className="w-full border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
-                {resolviendo ? 'Marcando...' : 'Solo marcar como resuelta'}
-              </button>
-              <button
-                onClick={() => setModal(null)}
-                className="w-full text-slate-600 hover:text-slate-400 text-xs py-2 transition-colors">
-                Cancelar
-              </button>
+              <button className="btn-secondary" onClick={() => setSelected(null)}>Cancelar</button>
             </div>
           </div>
         </div>
       )}
     </div>
   )
+}
+
+function SeverityBadge({ value }: { value: Severidad }) {
+  const map: Record<Severidad, string> = { critica: 'badge-red', alta: 'badge-red', media: 'badge-amber', baja: 'badge-blue', informativa: 'badge-gray' }
+  return <span className={`badge ${map[value]}`}>{value}</span>
+}
+
+function StateBadge({ value }: { value: string }) {
+  const map: Record<string, string> = { nueva: 'badge-red', en_revision: 'badge-amber', asignada: 'badge-blue', accion_ejecutada: 'badge-purple', resuelta: 'badge-green', falsa_alarma: 'badge-gray' }
+  return <span className={`badge ${map[value] || 'badge-gray'}`}>{STATE_LABEL[value] || value}</span>
+}
+
+function Info({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-lg bg-[#09111c] border border-[#1a2a40] p-3"><div className="text-slate-600 uppercase tracking-wider text-[10px]">{label}</div><div className="text-slate-300 mt-1 break-all">{value}</div></div>
 }
