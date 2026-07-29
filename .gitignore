@@ -1,3 +1,9 @@
 node_modules/
 .next/
-.env.local
+.env
+.env.*
+!.env.example
+*.log
+__pycache__/
+agent/windows/config.json
+agent/windows/state.json

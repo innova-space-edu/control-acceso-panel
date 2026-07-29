@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { createSupabaseBrowser } from '@/lib/supabase'
 import { useRouter } from 'next/navigation'
+import { registrarEvento } from '@/lib/events'
 
 function Logo() {
   const [error, setError] = useState(false)
@@ -41,6 +42,7 @@ export default function LoginPage() {
       setCargando(false)
       return
     }
+    await registrarEvento({ categoria: 'administracion', tipo_evento: 'inicio_sesion_admin', resultado: 'exitoso', descripcion: `Inicio de sesión administrativo: ${email}` })
     router.push('/')
     router.refresh()
   }
