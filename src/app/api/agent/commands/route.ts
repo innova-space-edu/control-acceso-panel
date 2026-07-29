@@ -25,12 +25,12 @@ export async function GET(request: NextRequest) {
   const { admin, notebook } = identity
 
   await admin.from('comandos_remotos').update({ estado: 'expirado' })
-    .eq('notebook_id', notebook.id).in('estado', ['pendiente', 'enviado']).lt('expira_en', now)
+    .eq('notebook_id', notebook.id).in('estado', ['pendiente', 'enviado', 'recibido']).lt('expira_en', now)
 
   const { data: commands, error } = await admin.from('comandos_remotos')
-    .select('id, tipo, payload, motivo, prioridad, creado_en, expira_en')
+    .select('id, tipo, payload, motivo, prioridad, creado_en, expira_en, estado')
     .eq('notebook_id', notebook.id)
-    .in('estado', ['pendiente', 'enviado'])
+    .in('estado', ['pendiente', 'enviado', 'recibido'])
     .gt('expira_en', now)
     .order('prioridad', { ascending: true })
     .order('creado_en', { ascending: true })
@@ -38,13 +38,16 @@ export async function GET(request: NextRequest) {
   if (error) return NextResponse.json({ ok: false, message: error.message }, { status: 500 })
 
   if (commands?.length) {
-    await admin.from('comandos_remotos').update({ estado: 'recibido', recibido_en: now })
-      .in('id', commands.map(c => c.id))
-    await admin.from('eventos_sistema').insert(commands.map(c => ({
-      categoria: 'dispositivo', tipo_evento: `comando_${c.tipo}_recibido`, severidad: 'informativa',
-      resultado: 'recibido', descripcion: `${notebook.id} recibió el comando ${c.tipo}`,
-      notebook_id: notebook.id, comando_id: c.id, origen: 'agente',
-    })))
+    const newlyReceived = commands.filter(command => command.estado !== 'recibido')
+    if (newlyReceived.length) {
+      await admin.from('comandos_remotos').update({ estado: 'recibido', recibido_en: now })
+        .in('id', newlyReceived.map(command => command.id))
+      await admin.from('eventos_sistema').insert(newlyReceived.map(command => ({
+        categoria: 'dispositivo', tipo_evento: `comando_${command.tipo}_recibido`, severidad: 'informativa',
+        resultado: 'recibido', descripcion: `${notebook.id} recibió el comando ${command.tipo}`,
+        notebook_id: notebook.id, comando_id: command.id, origen: 'agente',
+      })))
+    }
   }
 
   return NextResponse.json({ ok: true, commands: commands || [], server_time: now })
