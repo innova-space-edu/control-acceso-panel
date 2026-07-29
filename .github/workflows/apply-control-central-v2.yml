@@ -1,0 +1,46 @@
+name: Apply Control Acceso V2
+
+on:
+  push:
+    branches:
+      - feature/control-central-v2
+    paths:
+      - '.v2-upload/**'
+      - '.github/workflows/apply-control-central-v2.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/control-central-v2
+          fetch-depth: 0
+
+      - name: Decode and apply V2 changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .v2-upload/part-*.b64 > /tmp/control-v2.b64
+          base64 --decode /tmp/control-v2.b64 > /tmp/control-v2-changes.tar.gz
+          tar -xzf /tmp/control-v2-changes.tar.gz -C .
+          rm -rf .v2-upload
+          rm -f .github/workflows/apply-control-central-v2.yml
+
+      - name: Commit project files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          git commit -m "feat: panel de control central V2"
+          git push origin HEAD:feature/control-central-v2
