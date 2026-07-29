@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import BtnLogout from '@/components/BtnLogout'
+import { createRealtimeRefresh } from '@/lib/realtime-refresh'
 import { supabase } from '@/lib/supabase'
 
 const nav = [
@@ -25,14 +26,19 @@ export default function Sidebar() {
   const [profile, setProfile] = useState<{ nombre?: string; rol?: string } | null>(null)
 
   useEffect(() => {
-    load()
+    const sync = createRealtimeRefresh(load, 400)
+    void sync.execute()
     const channel = supabase.channel('sidebar_global')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'examenes_kiosk' }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'incidencias' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'solicitudes_override' }, sync.schedule)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'examenes_kiosk' }, sync.schedule)
       .subscribe()
-    const interval = setInterval(load, 30_000)
-    return () => { clearInterval(interval); supabase.removeChannel(channel) }
+    const interval = setInterval(sync.schedule, 30_000)
+    return () => {
+      clearInterval(interval)
+      sync.cancel()
+      supabase.removeChannel(channel)
+    }
   }, [])
 
   async function load() {
