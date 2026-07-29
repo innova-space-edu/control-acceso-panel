@@ -17,7 +17,9 @@ $config = @{
   token = $Token
   kiosk_processes = @("msedge.exe", "chrome.exe", "control-acceso-kiosk.exe")
 } | ConvertTo-Json -Depth 4
-Set-Content -Path (Join-Path $Base "config.json") -Value $config -Encoding UTF8
+$configPath = Join-Path $Base "config.json"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($configPath, $config, $utf8NoBom)
 
 $pythonPath = (Get-Command $PythonExe).Source
 $action = New-ScheduledTaskAction -Execute $pythonPath -Argument ('"{0}"' -f (Join-Path $Base "agent.py")) -WorkingDirectory $Base
