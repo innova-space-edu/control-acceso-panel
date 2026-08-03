@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { supabase, type Estudiante, type Docente, type Notebook } from '@/lib/supabase'
 import { adminAction } from '@/lib/admin-api'
 import { formatDateTime } from '@/lib/format'
@@ -9,15 +9,15 @@ type Tab = 'estudiantes' | 'docentes' | 'notebooks'
 export default function GestionPage() {
   const [tab, setTab] = useState<Tab>('estudiantes')
   return (
-    <div className="max-w-4xl mx-auto">
+    <div className="max-w-6xl mx-auto">
       <div className="mb-7">
         <h1 className="text-2xl font-semibold text-slate-100 mb-1">Gestión</h1>
         <p className="text-slate-600 text-sm">Administrar estudiantes, docentes y notebooks</p>
       </div>
-      <div className="flex gap-1 bg-[#0d1520] border border-[#1a2a40] rounded-xl p-1 mb-6 w-fit">
+      <div className="flex gap-1 bg-[#0d1520] border border-[#1a2a40] rounded-xl p-1 mb-6 w-fit max-w-full overflow-x-auto">
         {(['estudiantes', 'docentes', 'notebooks'] as Tab[]).map(t => (
           <button key={t} onClick={() => setTab(t)}
-            className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors capitalize ${tab === t ? 'bg-blue-900/50 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}>
+            className={`px-5 py-2 rounded-lg text-sm font-medium transition-colors capitalize whitespace-nowrap ${tab === t ? 'bg-blue-900/50 text-blue-400' : 'text-slate-500 hover:text-slate-300'}`}>
             {t}
           </button>
         ))}
@@ -45,8 +45,8 @@ function ModalEliminar({ nombre, onConfirmar, onCancelar, eliminando }: {
             className="flex-1 bg-red-900 hover:bg-red-800 text-red-300 font-semibold text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
             {eliminando ? 'Eliminando...' : 'Sí, eliminar'}
           </button>
-          <button onClick={onCancelar}
-            className="flex-1 border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors">
+          <button onClick={onCancelar} disabled={eliminando}
+            className="flex-1 border border-[#1e3a5f] text-slate-400 hover:text-slate-200 text-sm py-2.5 rounded-lg transition-colors disabled:opacity-50">
             Cancelar
           </button>
         </div>
@@ -56,29 +56,44 @@ function ModalEliminar({ nombre, onConfirmar, onCancelar, eliminando }: {
 }
 
 function TablaEstudiantes() {
-  const [items, setItems]       = useState<Estudiante[]>([])
-  const [loading, setLoading]   = useState(true)
+  const [items, setItems] = useState<Estudiante[]>([])
+  const [loading, setLoading] = useState(true)
   const [busqueda, setBusqueda] = useState('')
+  const [cursoSeleccionado, setCursoSeleccionado] = useState('')
   const [guardando, setGuardando] = useState(false)
-  const [error, setError]       = useState('')
-  const [exito, setExito]       = useState('')
+  const [error, setError] = useState('')
+  const [exito, setExito] = useState('')
   const [editando, setEditando] = useState<Estudiante | null>(null)
-  const [form, setForm]         = useState({ rut: '', nombre: '', curso: '', observacion: '' })
+  const [form, setForm] = useState({ rut: '', nombre: '', curso: '', observacion: '' })
   const [modoEdicion, setModoEdicion] = useState(false)
   const [confirmEliminar, setConfirmEliminar] = useState<Estudiante | null>(null)
   const [eliminando, setEliminando] = useState(false)
 
   useEffect(() => { cargar() }, [])
 
+  useEffect(() => {
+    if (cursoSeleccionado && !items.some(item => item.curso === cursoSeleccionado)) {
+      setCursoSeleccionado('')
+      setBusqueda('')
+    }
+  }, [cursoSeleccionado, items])
+
   async function cargar() {
-    const { data } = await supabase.from('estudiantes').select('*').order('nombre')
-    setItems(data || [])
+    setLoading(true)
+    const { data, error: loadError } = await supabase.from('estudiantes').select('*').order('nombre')
+    if (loadError) {
+      setError(`No fue posible cargar los estudiantes: ${loadError.message}`)
+      setItems([])
+    } else {
+      setItems(data || [])
+    }
     setLoading(false)
   }
 
   function iniciarEdicion(e: Estudiante) {
     setEditando(e)
     setForm({ rut: e.rut, nombre: e.nombre, curso: e.curso, observacion: e.observacion || '' })
+    setCursoSeleccionado(e.curso)
     setModoEdicion(true)
     setError(''); setExito('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
@@ -91,36 +106,96 @@ function TablaEstudiantes() {
   }
 
   async function guardar() {
-    if (!form.rut || !form.nombre || !form.curso) { setError('RUT, nombre y curso son obligatorios'); return }
+    if (!form.rut || !form.nombre || !form.curso) {
+      setError('RUT, nombre y curso son obligatorios')
+      return
+    }
+
     setGuardando(true); setError(''); setExito('')
-    const { error: err } = await supabase.from('estudiantes').upsert({
-      rut: form.rut.trim(), nombre: form.nombre.trim(),
-      curso: form.curso.trim(), observacion: form.observacion.trim() || null,
+    const nombreGuardado = form.nombre.trim()
+    const cursoGuardado = form.curso.trim()
+    const { error: saveError } = await supabase.from('estudiantes').upsert({
+      rut: form.rut.trim(),
+      nombre: nombreGuardado,
+      curso: cursoGuardado,
+      observacion: form.observacion.trim() || null,
     })
-    if (err) { setError(err.message) } else {
-      setExito(`"${form.nombre}" ${modoEdicion ? 'actualizado' : 'agregado'} correctamente.`)
-      cancelarEdicion(); await cargar()
+
+    if (saveError) {
+      setError(`No fue posible ${modoEdicion ? 'editar' : 'agregar'} el estudiante: ${saveError.message}`)
+    } else {
+      setCursoSeleccionado(cursoGuardado)
+      setBusqueda('')
+      setExito(`"${nombreGuardado}" ${modoEdicion ? 'actualizado' : 'agregado'} correctamente.`)
+      cancelarEdicion()
+      await cargar()
     }
     setGuardando(false)
   }
 
   async function toggleActivo(rut: string, activo: boolean) {
-    await supabase.from('estudiantes').update({ activo: !activo }).eq('rut', rut)
+    setError(''); setExito('')
+    const { data, error: updateError } = await supabase
+      .from('estudiantes')
+      .update({ activo: !activo })
+      .eq('rut', rut)
+      .select('rut')
+      .maybeSingle()
+
+    if (updateError) {
+      setError(`No fue posible cambiar el estado: ${updateError.message}`)
+      return
+    }
+    if (!data) {
+      setError('El estado no fue modificado. Revisa los permisos administrativos de Supabase.')
+      return
+    }
     await cargar()
   }
 
   async function eliminar() {
     if (!confirmEliminar) return
-    setEliminando(true)
-    await supabase.from('estudiantes').delete().eq('rut', confirmEliminar.rut)
-    setConfirmEliminar(null); setEliminando(false); await cargar()
+    setEliminando(true); setError(''); setExito('')
+
+    const estudiante = confirmEliminar
+    const { data, error: deleteError } = await supabase
+      .from('estudiantes')
+      .delete()
+      .eq('rut', estudiante.rut)
+      .select('rut')
+      .maybeSingle()
+
+    if (deleteError) {
+      setError(`No fue posible eliminar el estudiante: ${deleteError.message}`)
+    } else if (!data) {
+      setError('El estudiante no fue eliminado. Revisa que la migración de permisos administrativos esté aplicada en Supabase.')
+    } else {
+      setExito(`"${estudiante.nombre}" fue eliminado correctamente.`)
+      setConfirmEliminar(null)
+      await cargar()
+    }
+    setEliminando(false)
   }
 
-  const filtrados = items.filter(e =>
-    e.nombre.toLowerCase().includes(busqueda.toLowerCase()) ||
-    e.rut.includes(busqueda) ||
-    e.curso.toLowerCase().includes(busqueda.toLowerCase())
-  )
+  const cursos = useMemo(() => {
+    const conteo = new Map<string, number>()
+    items.forEach(item => {
+      const curso = item.curso?.trim()
+      if (curso) conteo.set(curso, (conteo.get(curso) || 0) + 1)
+    })
+    return Array.from(conteo.entries()).sort(([a], [b]) =>
+      a.localeCompare(b, 'es', { numeric: true, sensitivity: 'base' })
+    )
+  }, [items])
+
+  const termino = busqueda.trim().toLowerCase()
+  const filtrados = cursoSeleccionado
+    ? items.filter(e => e.curso === cursoSeleccionado && (
+        !termino ||
+        e.nombre.toLowerCase().includes(termino) ||
+        e.rut.toLowerCase().includes(termino)
+      ))
+    : []
 
   return (
     <div>
@@ -133,7 +208,7 @@ function TablaEstudiantes() {
             <button onClick={cancelarEdicion} className="text-xs text-slate-600 hover:text-slate-400 transition-colors">✕ Cancelar edición</button>
           )}
         </div>
-        <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="grid md:grid-cols-3 gap-3 mb-3">
           <div>
             <label className="text-slate-600 text-xs block mb-1">RUT</label>
             <input className="input-dark" placeholder="12.345.678-9" value={form.rut} disabled={modoEdicion}
@@ -162,22 +237,52 @@ function TablaEstudiantes() {
         </button>
       </div>
 
-      <div className="mb-3">
-        <input className="input-dark" placeholder="Buscar por nombre, RUT o curso..."
-          value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+      <div className="bg-[#0d1520] border border-[#1a2a40] rounded-xl p-4 mb-3">
+        <div className="grid md:grid-cols-[minmax(260px,0.85fr)_1.15fr] gap-3 items-end">
+          <div>
+            <label className="text-slate-500 text-xs font-medium block mb-1.5">Seleccionar curso</label>
+            <select
+              className="input-dark cursor-pointer"
+              value={cursoSeleccionado}
+              onChange={e => { setCursoSeleccionado(e.target.value); setBusqueda('') }}
+              disabled={loading || cursos.length === 0}
+            >
+              <option value="">Selecciona un curso...</option>
+              {cursos.map(([curso, cantidad]) => (
+                <option key={curso} value={curso}>{curso} ({cantidad})</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="text-slate-500 text-xs font-medium block mb-1.5">Buscar dentro del curso</label>
+            <input
+              className="input-dark"
+              placeholder={cursoSeleccionado ? 'Buscar por nombre o RUT...' : 'Primero selecciona un curso'}
+              value={busqueda}
+              onChange={e => setBusqueda(e.target.value)}
+              disabled={!cursoSeleccionado}
+            />
+          </div>
+        </div>
       </div>
 
-      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
-        <div className="px-5 py-3 border-b border-[#1a2a40] text-slate-600 text-xs">
-          {filtrados.length} estudiante{filtrados.length !== 1 ? 's' : ''}
+      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-x-auto">
+        <div className="px-5 py-3 border-b border-[#1a2a40] text-slate-500 text-xs min-w-[760px]">
+          {loading
+            ? 'Cargando estudiantes...'
+            : cursoSeleccionado
+              ? `${filtrados.length} estudiante${filtrados.length !== 1 ? 's' : ''} en ${cursoSeleccionado}`
+              : `${items.length} estudiantes registrados · selecciona un curso para ver la lista`}
         </div>
-        <table className="tabla w-full">
+        <table className="tabla w-full min-w-[760px]">
           <thead><tr><th>RUT</th><th>Nombre</th><th>Curso</th><th>Estado</th><th>Acciones</th></tr></thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="text-center text-slate-600 py-8">Cargando...</td></tr>
+              <tr><td colSpan={5} className="text-center text-slate-600 py-10">Cargando...</td></tr>
+            ) : !cursoSeleccionado ? (
+              <tr><td colSpan={5} className="text-center text-slate-500 py-12">Selecciona un curso en el menú desplegable para ver sus estudiantes.</td></tr>
             ) : filtrados.length === 0 ? (
-              <tr><td colSpan={5} className="text-center text-slate-600 py-8">Sin resultados</td></tr>
+              <tr><td colSpan={5} className="text-center text-slate-600 py-10">No hay estudiantes que coincidan con la búsqueda.</td></tr>
             ) : filtrados.map(e => (
               <tr key={e.rut} className={editando?.rut === e.rut ? 'bg-blue-950/20' : ''}>
                 <td className="font-mono text-xs">{e.rut}</td>
@@ -192,7 +297,7 @@ function TablaEstudiantes() {
                 <td>
                   <div className="flex items-center gap-3">
                     <button onClick={() => iniciarEdicion(e)} className="text-xs text-blue-500 hover:text-blue-300 transition-colors">✎ Editar</button>
-                    <button onClick={() => setConfirmEliminar(e)} className="text-xs text-red-600 hover:text-red-400 transition-colors">✕ Eliminar</button>
+                    <button onClick={() => { setError(''); setExito(''); setConfirmEliminar(e) }} className="text-xs text-red-600 hover:text-red-400 transition-colors">✕ Eliminar</button>
                   </div>
                 </td>
               </tr>
@@ -272,7 +377,7 @@ function TablaDocentes() {
             <button onClick={cancelarEdicion} className="text-xs text-slate-600 hover:text-slate-400 transition-colors">✕ Cancelar edición</button>
           )}
         </div>
-        <div className="grid grid-cols-3 gap-3 mb-3">
+        <div className="grid md:grid-cols-3 gap-3 mb-3">
           <div>
             <label className="text-slate-600 text-xs block mb-1">RUT</label>
             <input className="input-dark" placeholder="18.324.719-0" value={form.rut} disabled={modoEdicion}
@@ -295,8 +400,8 @@ function TablaDocentes() {
           {guardando ? 'Guardando...' : modoEdicion ? '💾 Guardar cambios' : 'Agregar docente'}
         </button>
       </div>
-      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-hidden">
-        <table className="tabla w-full">
+      <div className="bg-[#0d1520] rounded-xl border border-[#1a2a40] overflow-x-auto">
+        <table className="tabla w-full min-w-[720px]">
           <thead><tr><th>RUT</th><th>Nombre</th><th>Especialidad</th><th>Estado</th><th>Acciones</th></tr></thead>
           <tbody>
             {loading ? (
